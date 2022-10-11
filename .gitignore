@@ -1,0 +1,16 @@
+.vscode/
+CA/
+CMakeLists.txt
+
+Server/Storage/*
+Server/class_template.cpp
+Server/Cloud*
+Server/CryptoManager.cpp
+Server/server
+
+Common/Packet*
+
+Client/.vscode
+Client/Alice
+Client/Bob
+Client/client
