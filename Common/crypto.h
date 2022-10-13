@@ -36,6 +36,13 @@ int gcm_decrypt(unsigned char *ciphertext, int ciphertext_len,
                 unsigned char *iv, int iv_len,
                 unsigned char *plaintext);
 
+int gcm_authenticate(unsigned char* aad, int aad_len,
+                     unsigned char* key, unsigned char* iv,
+                     unsigned char* tag);
+
+int gcm_verify(unsigned char *aad, int aad_len, 
+               unsigned char *key, unsigned char *iv, unsigned char *tag);
+
 void generate_random(unsigned char* buf, int size);
 
 X509* get_certificate(std::string path);

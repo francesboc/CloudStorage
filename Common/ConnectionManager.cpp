@@ -37,25 +37,150 @@ int writen(long fd, void *buf, size_t size){
     return 1;
 }
 
-int read_message(int fd, unsigned char* key, unsigned char** message){
+int send_data(int fd, unsigned char* message, int len){
+    int err;
+    err = writen(fd, &len, sizeof(int));
+    if(err <= 0){
+        cerr << "Fail to write message" << endl;
+        return 0;
+    }
+    err = writen(fd, message, len);
+    if(err <= 0){
+        cerr << "Fail to write message" << endl;
+        return 0;
+    }
+
+    return 1;
+}
+
+int read_data(int fd, unsigned char** message, int* len){
+    int err;
+    err = readn(fd, len, sizeof(int));
+    if(err <= 0){
+        cerr << "Fail to read message" << endl;
+        return 0;
+    }
+    NEW(*message, new unsigned char[*len], "new message");
+    err = readn(fd, *message, *len);
+    if(err <= 0){
+        cerr << "Fail to read message" << endl;
+        return 0;
+    }
+    return 1;
+}
+
+int my_send_message(int fd, unsigned char* key, command_t msg_type,
+    string message, int* seq_number, int nmessages){
+    
+    unsigned char* message_to_send; 
+    NEW(message_to_send, new unsigned char[CLR_FRAGMENT], "message to send");
+    memset(message_to_send, 0, CLR_FRAGMENT);
+    if(!message.empty()){
+        // convert string into a standard size buffer
+        memcpy(message_to_send, message.c_str(), message.size());
+    }
+    
+    unsigned char* iv;  NEW(iv, new unsigned char[IV_SIZE], "new iv");
+    generate_random(iv, IV_SIZE);
+
+    int cphr_len, tag_len, err;
+
+    unsigned char* cphr_buf; NEW(cphr_buf, new unsigned char[CPHR_FRAGMENT], "new cphr buf");
+    unsigned char* tag_buf; NEW(tag_buf, new unsigned char[TAG_SIZE], "new tag buf");
+    unsigned char* aads; NEW(aads, new unsigned char[AAD_FRAGMNENT], "new aads");
+    memset(aads, 0, AAD_FRAGMNENT);
+    memcpy(aads, &msg_type, sizeof(command_t));
+    memcpy(aads + sizeof(command_t), seq_number, sizeof(int));
+    memcpy(aads + sizeof(command_t) + sizeof(int), &nmessages, sizeof(int));
+    memcpy(aads + sizeof(command_t) + sizeof(int) + sizeof(int), iv, IV_SIZE);
+
+    cphr_len = gcm_encrpyt(message_to_send, CLR_FRAGMENT, aads, AAD_FRAGMNENT, key, iv, IV_SIZE, cphr_buf, tag_buf);
+    if (cphr_len == 0){
+        // Error while encrypting
+        cout << "Encrypt message fail (occhio alla lunghezza 0)" << endl;
+        delete [] cphr_buf;
+        delete [] tag_buf;
+        delete [] aads;
+        delete [] iv;
+        delete [] message_to_send;
+        return 0;
+    }
+
+    unsigned char* request; NEW(request, new unsigned char[MSG_FRAGMENT], "new request");
+    memcpy(request, &msg_type, sizeof(command_t));
+    memcpy(request + sizeof(command_t), seq_number, sizeof(int));
+    memcpy(request + sizeof(command_t) + sizeof(int), &nmessages, sizeof(int));
+    memcpy(request + sizeof(command_t) + sizeof(int) + sizeof(int), iv, IV_SIZE);
+    memcpy(request + sizeof(command_t) + sizeof(int) + sizeof(int) + IV_SIZE, cphr_buf, CPHR_FRAGMENT);
+    memcpy(request + sizeof(command_t) + sizeof(int) + sizeof(int) + IV_SIZE + CPHR_FRAGMENT, tag_buf, TAG_SIZE);
+
+    /*printf("IV sent: \n");
+    BIO_dump_fp (stdout, (const char *)iv, IV_SIZE);
+    printf("Aads sent: \n");
+    BIO_dump_fp (stdout, (const char *)aads, AAD_FRAGMNENT);
+    printf("Tag buf sent: \n");
+    BIO_dump_fp (stdout, (const char *)tag_buf, TAG_SIZE);
+    printf("Cphr sent: \n");
+    BIO_dump_fp (stdout, (const char *)cphr_buf, CPHR_FRAGMENT);
+    fflush(NULL);*/
+
+    // Send to server the message
+    err = writen(fd, request, MSG_FRAGMENT);
+    
+    delete [] cphr_buf;
+    delete [] tag_buf;
+    delete [] request;
+    delete [] iv;
+    delete [] aads;
+    delete [] message_to_send;
+    if(err <= 0) return 0;
+    *seq_number++;
+    return cphr_len;
+
+}
+
+command_t my_read_message(int fd, unsigned char* key, unsigned char** message,
+ int* seq_number, int* nmessages){
     int err;
     unsigned char* request; NEW(request, new unsigned char[MSG_FRAGMENT], "new request");
     err = readn(fd, request, MSG_FRAGMENT);
     if (err <= 0){
         cout << "Fail to read request" << endl;
         delete [] request;
-        return -1;
+        return OP_FAIL;
+    }
+
+    command_t msg_type;
+    int received_seq_number;
+    memcpy(&msg_type, request, sizeof(command_t));
+    memcpy(&received_seq_number, request + sizeof(command_t), sizeof(int));
+    memcpy(nmessages, request + sizeof(command_t) + sizeof(int), sizeof(int));
+
+    if(*seq_number != received_seq_number){
+        // message reply detected
+        cout << "Different sequence number detected" << endl;
+        delete [] request;
+        return OP_FAIL;
     }
 
     unsigned char* cphr_buf; NEW(cphr_buf, new unsigned char[CPHR_FRAGMENT], "new cphr buf");
     unsigned char* tag_buf; NEW(tag_buf, new unsigned char[TAG_SIZE], "new tag buf");
     unsigned char* iv; NEW(iv, new unsigned char[IV_SIZE], "new iv");
     unsigned char* aads; NEW(aads, new unsigned char[AAD_FRAGMNENT], "new aads");
+
     memset(aads, 0, AAD_FRAGMNENT);
-    memcpy(iv, request, IV_SIZE);
-    memcpy(aads, iv, IV_SIZE);
-    memcpy(cphr_buf, request + IV_SIZE, CPHR_FRAGMENT);
-    memcpy(tag_buf, request + IV_SIZE + CPHR_FRAGMENT, TAG_SIZE);
+    memcpy(iv, request + sizeof(command_t) + sizeof(int) + sizeof(int), IV_SIZE);
+
+    memcpy(aads, &msg_type, sizeof(command_t));
+    memcpy(aads + sizeof(command_t), &received_seq_number, sizeof(int));
+    memcpy(aads + sizeof(command_t) + sizeof(int), nmessages, sizeof(int));
+    memcpy(aads + sizeof(command_t) + sizeof(int) + sizeof(int), iv, IV_SIZE);
+    //cout << "Received sequence number " << received_seq_number << endl;
+    //cout << "Received message type " << msg_type << endl;
+
+    memcpy(cphr_buf, request + sizeof(command_t) + sizeof(int) + sizeof(int) + IV_SIZE, CPHR_FRAGMENT);
+    memcpy(tag_buf, request + sizeof(command_t) + sizeof(int) + sizeof(int) + IV_SIZE + CPHR_FRAGMENT, TAG_SIZE);
+
     /*printf("IV received: \n");
     BIO_dump_fp (stdout, (const char *)iv, IV_SIZE);
     printf("Aads received: \n");
@@ -78,27 +203,124 @@ int read_message(int fd, unsigned char* key, unsigned char** message){
         // error in decrpytion
         cout << "Decrypt message fail (occhio alla lunghezza 0)" << endl;
         delete [] *message;
-        return 0;
+        return OP_FAIL;
     }
-    return pt_len;
+    *seq_number++;
+    return msg_type;
 }
 
-int send_message(int fd, unsigned char* key, unsigned char* message){
-
+int send_authenticated_msg(int fd, unsigned char* key, command_t msg_type, int* seq_number){
     unsigned char* iv;  NEW(iv, new unsigned char[IV_SIZE], "new iv");
     generate_random(iv, IV_SIZE);
-    int cphr_len, tag_len, err;
 
-    unsigned char* cphr_buf; NEW(cphr_buf, new unsigned char[CPHR_FRAGMENT], "new cphr buf");
+    int tag_len, err;
+
     unsigned char* tag_buf; NEW(tag_buf, new unsigned char[TAG_SIZE], "new tag buf");
     unsigned char* aads; NEW(aads, new unsigned char[AAD_FRAGMNENT], "new aads");
     memset(aads, 0, AAD_FRAGMNENT);
-    memcpy(aads, iv, IV_SIZE);
+    memcpy(aads, &msg_type, sizeof(command_t));
+    memcpy(aads + sizeof(command_t), seq_number, sizeof(int));
+    memcpy(aads + sizeof(command_t) + sizeof(int), iv, IV_SIZE);
 
-    cphr_len = gcm_encrpyt(message, CLR_FRAGMENT, aads, AAD_FRAGMNENT, key, iv, IV_SIZE, cphr_buf, tag_buf);
+    err = gcm_authenticate(aads, AAD_FRAGMNENT, key, iv, tag_buf);
+    if (err == 0){
+        // Error while encrypting
+        cout << "Authenticate message fail (occhio alla lunghezza 0)" << endl;
+        delete [] tag_buf;
+        delete [] aads;
+        delete [] iv;
+        return 0;
+    }
+
+    unsigned char* request; NEW(request, new unsigned char[CPHR_FRAGMENT], "new request");
+    memcpy(request, &msg_type, sizeof(command_t));
+    memcpy(request + sizeof(command_t), seq_number, sizeof(int));
+    memcpy(request + sizeof(command_t) + sizeof(int), iv, IV_SIZE);
+    memcpy(request + sizeof(command_t) + sizeof(int) + IV_SIZE, tag_buf, TAG_SIZE);
+
+    // Send to server the message
+    err = writen(fd, request, CPHR_FRAGMENT);
+    
+    delete [] tag_buf;
+    delete [] request;
+    delete [] iv;
+    delete [] aads;
+    if(err <= 0) return 0;
+    *seq_number++;
+    return 1;
+}
+
+command_t read_authenticated_msg(int fd, unsigned char* key, int* seq_number){
+    int err;
+    unsigned char* request; NEW(request, new unsigned char[CPHR_FRAGMENT], "new request");
+    err = readn(fd, request, CPHR_FRAGMENT);
+    if (err <= 0){
+        cout << "Fail to read request" << endl;
+        delete [] request;
+        return OP_FAIL;
+    }
+
+    command_t msg_type;
+    int received_seq_number;
+    memcpy(&msg_type, request, sizeof(command_t));
+    memcpy(&received_seq_number, request + sizeof(command_t), sizeof(int));
+    if(*seq_number != received_seq_number){
+        // message reply detected
+        cout << "Different sequence number detected" << endl;
+        delete [] request;
+        return OP_FAIL;
+    }
+
+    unsigned char* tag_buf; NEW(tag_buf, new unsigned char[TAG_SIZE], "new tag buf");
+    unsigned char* iv; NEW(iv, new unsigned char[IV_SIZE], "new iv");
+    unsigned char* aads; NEW(aads, new unsigned char[AAD_FRAGMNENT], "new aads");
+
+    memset(aads, 0, AAD_FRAGMNENT);
+    memcpy(iv, request + sizeof(command_t) + sizeof(int), IV_SIZE);
+
+    memcpy(aads, &msg_type, sizeof(command_t));
+    memcpy(aads + sizeof(command_t), &received_seq_number, sizeof(int));
+    memcpy(aads + sizeof(command_t) + sizeof(int), iv, IV_SIZE);
+    //cout << "Received sequence number " << received_seq_number << endl;
+    //cout << "Received message type " << msg_type << endl;
+    memcpy(tag_buf, request + sizeof(command_t) + sizeof(int) + IV_SIZE, TAG_SIZE);
+    delete [] request;
+    
+    err = gcm_verify(aads, AAD_FRAGMNENT, key, iv, tag_buf);
+    
+    delete [] tag_buf;
+    delete [] iv;
+    delete [] aads;
+    if (err == 0){
+        // error in decrpytion
+        cout << "Verify message fail (occhio alla lunghezza 0)" << endl;
+        return OP_FAIL;
+    }
+    *seq_number++;
+    return msg_type;
+}
+
+int send_message(int fd, unsigned char* key, command_t msg_type, string message, int* seq_number){
+
+    unsigned char* iv;  NEW(iv, new unsigned char[IV_SIZE], "new iv");
+    generate_random(iv, IV_SIZE);
+
+    int plain_len = message.size();
+    int cphr_len = plain_len + 16;
+    int tag_len, err;
+
+    unsigned char* cphr_buf; NEW(cphr_buf, new unsigned char[cphr_len], "new cphr buf");
+    unsigned char* tag_buf; NEW(tag_buf, new unsigned char[TAG_SIZE], "new tag buf");
+    unsigned char* aads; NEW(aads, new unsigned char[AAD_FRAGMNENT], "new aads");
+    memset(aads, 0, AAD_FRAGMNENT);
+    memcpy(aads, &msg_type, sizeof(command_t));
+    memcpy(aads + sizeof(command_t), seq_number, sizeof(int));
+    memcpy(aads + sizeof(command_t) + sizeof(int), iv, IV_SIZE);
+
+    cphr_len = gcm_encrpyt((unsigned char*)message.c_str(), plain_len, aads, AAD_FRAGMNENT, key, iv, IV_SIZE, cphr_buf, tag_buf);
     if (cphr_len == 0){
         // Error while encrypting
-        cout << "Ecnrypt message fail (occhio alla lunghezza 0)" << endl;
+        cout << "Encrypt message fail (occhio alla lunghezza 0)" << endl;
         delete [] cphr_buf;
         delete [] tag_buf;
         delete [] aads;
@@ -106,30 +328,90 @@ int send_message(int fd, unsigned char* key, unsigned char* message){
         return 0;
     }
 
-    unsigned char* request; NEW(request, new unsigned char[MSG_FRAGMENT], "new request");
-    memcpy(request, iv, IV_SIZE);
-    memcpy(request + IV_SIZE, cphr_buf, CPHR_FRAGMENT);
-    memcpy(request + IV_SIZE + CPHR_FRAGMENT, tag_buf, TAG_SIZE);
-    /*printf("IV sent: \n");
-    BIO_dump_fp (stdout, (const char *)iv, IV_SIZE);
-    printf("Aads sent: \n");
-    BIO_dump_fp (stdout, (const char *)aads, AAD_FRAGMNENT);
-    printf("Tag buf sent: \n");
-    BIO_dump_fp (stdout, (const char *)tag_buf, TAG_SIZE);
-    printf("Cphr sent: \n");
-    BIO_dump_fp (stdout, (const char *)cphr_buf, CPHR_FRAGMENT);
-    fflush(NULL);*/
-
-    // Send to server the message
-    err = writen(fd, request, MSG_FRAGMENT);
+    int request_len = sizeof(command_t) + sizeof(int) + sizeof(int) + IV_SIZE + cphr_len + TAG_SIZE; 
+    unsigned char* request; NEW(request, new unsigned char[request_len], "new request");
+    memcpy(request, &msg_type, sizeof(command_t));
+    memcpy(request + sizeof(command_t), seq_number, sizeof(int));
+    memcpy(request + sizeof(command_t) + sizeof(int), &cphr_len, sizeof(int));
+    memcpy(request + sizeof(command_t) + sizeof(int) + sizeof(int), iv, IV_SIZE);
+    memcpy(request + sizeof(command_t) + sizeof(int) + sizeof(int) + IV_SIZE, cphr_buf, cphr_len);
+    memcpy(request + sizeof(command_t) + sizeof(int) + sizeof(int) + IV_SIZE + cphr_len, tag_buf, TAG_SIZE);
+    
+    // send request with its size
+    err = send_data(fd, request, request_len);
 
     delete [] cphr_buf;
     delete [] tag_buf;
     delete [] request;
     delete [] iv;
     delete [] aads;
-    if(err <= 0) return 0;
-    return cphr_len;
+    if(err == 0) return 0;
+    *seq_number++;
+    return 1;
+}
+
+command_t read_message(int fd, unsigned char* key, string &plaintext, int *seq_number){
+    int err, request_len;
+    unsigned char* request;
+
+    err = read_data(fd, &request, &request_len);
+    if(err == 0){
+        cout << "Fail to read request" << endl;
+        delete [] request;
+        return OP_FAIL;
+    }
+
+    unsigned char* tag_buf; NEW(tag_buf, new unsigned char[TAG_SIZE], "new tag buf");
+    unsigned char* iv; NEW(iv, new unsigned char[IV_SIZE], "new iv");
+    unsigned char* aads; NEW(aads, new unsigned char[AAD_FRAGMNENT], "new aads");
+
+    int cphr_len, received_seq_number;
+    command_t msg_type;
+
+    memcpy(&msg_type, request, sizeof(command_t));
+    memcpy(&received_seq_number, request + sizeof(command_t), sizeof(int));
+    memcpy(&cphr_len, request + sizeof(command_t) + sizeof(int), sizeof(int));
+    unsigned char* cphr_buf; NEW(cphr_buf, new unsigned char[cphr_len], "new cphr buf");
+    memcpy(iv, request + sizeof(command_t) + sizeof(int) + sizeof(int), IV_SIZE);
+    memcpy(cphr_buf, request + sizeof(command_t) + sizeof(int) + sizeof(int) + IV_SIZE, cphr_len);
+    memcpy(tag_buf, request + sizeof(command_t) + sizeof(int) + sizeof(int) + IV_SIZE + cphr_len, TAG_SIZE);
+
+    if(*seq_number != received_seq_number){
+        // message reply detected
+        cout << "Different sequence number detected" << endl;
+        delete [] request;
+        return OP_FAIL;
+    }
+    
+    memset(aads, 0, AAD_FRAGMNENT);
+    memcpy(aads, &msg_type, sizeof(command_t));
+    memcpy(aads + sizeof(command_t), seq_number, sizeof(int));
+    memcpy(aads + sizeof(command_t) + sizeof(int), iv, IV_SIZE);
+
+    delete [] request;
+    
+    unsigned char* message; NEW(message, new unsigned char[cphr_len], "new message");
+    int pt_len = gcm_decrypt(cphr_buf, cphr_len, aads, AAD_FRAGMNENT, tag_buf, key, iv, IV_SIZE, message);
+    
+    delete [] cphr_buf;
+    delete [] tag_buf;
+    delete [] iv;
+    delete [] aads;
+    if (pt_len == 0){
+        // error in decrpytion
+        cout << "Decrypt message fail (occhio alla lunghezza 0)" << endl;
+        delete [] message;
+        return OP_FAIL;
+    }
+
+    char* chr_message; NEW(chr_message, new char[pt_len + 1],"new chr_message");
+    memmove(chr_message,message,pt_len);
+    chr_message[pt_len] = '\0';
+    plaintext = (string) chr_message;
+    delete [] message;
+    delete [] chr_message;
+    *seq_number++;
+    return msg_type;
 }
 
 /**

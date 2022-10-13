@@ -39,6 +39,9 @@ typedef enum {
     DOWNLOAD        = 1,   /// richiesta di connessione di un client
     DELETE          = 2,   /// richiesta di invio di un messaggio testuale ad un nickname o groupname
     LIST            = 3,   /// richiesta di invio di un messaggio testuale a tutti gli utenti 
+    LIST_REQ        = 6,
+    LIST_RSP        = 7,
+    LIST_DONE       = 8, 
     RENAME          = 4,   /// richiesta di invio di un file ad un nickname o groupname
     LOGOUT          = 5,   /// richiesta di recupero di un file
     /* ------------------------------------------ */
@@ -49,8 +52,12 @@ typedef enum {
     HANDSHAKE_PH2   = 22,  // notifica di messaggio "file disponibile"
     HANDSHAKE_PH3   = 23,
     HANDSHAKE_ERR   = 24,
-
-    OP_FAIL         = 25,  // generico messaggio di fallimento
+    /* ------------------------------------------ */
+    /*    error codes                             */
+    /* ------------------------------------------ */
+    ERROR_MSGS      = 40,
+    OP_FAIL         = 41,  // generico messaggio di fallimento
+    CLIENT_EOF      = 42,  // client reach EOF or crashed
     OP_NICK_ALREADY = 26,  // nickname o groupname gia' registrato
     OP_NICK_UNKNOWN = 27,  // nickname non riconosciuto
     OP_MSG_TOOLONG  = 28,  // messaggio con size troppo lunga
@@ -63,8 +70,13 @@ typedef enum {
 
 int readn(long fd, void *buf, size_t size);
 int writen(long fd, void *buf, size_t size);
-int read_message(int fd, unsigned char* key, unsigned char** message);
-int send_message(int fd, unsigned char* key, unsigned char* message);
+command_t read_message(int fd, unsigned char* key, string &plaintext, int *seq_number);
+int send_message(int fd, unsigned char* key, command_t msg_type, string message, int* seq_number);
+
+command_t my_read_message(int fd, unsigned char* key, unsigned char** message, int* seq_number, int* nmessages);
+int my_send_message(int fd, unsigned char* key, command_t msg_type, string message, int* seq_number, int nmessages);
+int send_authenticated_msg(int fd, unsigned char* key, command_t msg_type, int* seq_number);
+command_t read_authenticated_msg(int fd, unsigned char* key, int* seq_number);
 
 int serialize_certificate(int fd, X509* srv_cert, unsigned char** cert_buf);
 int serialize_pubkey(int fd, EVP_PKEY* pubkey, unsigned char** pubkey_buf);

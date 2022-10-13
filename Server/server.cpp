@@ -1,6 +1,8 @@
 #include <cstring>
 #include <string>
 #include <fstream>
+#include <sys/stat.h>
+#include <sys/types.h>
 // PER SOCKET
 #include <sys/socket.h>
 #include <netinet/in.h>
@@ -29,9 +31,9 @@ void *manage_client(void *arg);
 
 vector<string> extract_params(string message);
 // Operations
-void list(int fd, string username, unsigned char *key);
+void list(int fd, string username, unsigned char *key, int* seq_number);
 
-unsigned char *handshake(int fd, char** username);
+unsigned char* handshake(int fd, string &username);
 
 std::mutex mtx_online_users;
 vector<string> online_users;
@@ -203,8 +205,32 @@ void configure_server(){
         }
     }
     else{ perror("cannot configure server"); exit(EXIT_FAILURE); }
-    // mkdir of registered users
     fp.close();
+    // Allocate "dedicated storage" for each registered user
+    DIR* storage_dir;
+    storage_dir = opendir(SERVER_STORAGE);
+    if(!storage_dir){
+        // we need to create the directory
+        if(mkdir(SERVER_STORAGE, 0774)==-1){
+            perror("Storage directory");
+            exit(EXIT_FAILURE);
+        }
+    }
+    closedir(storage_dir);
+    // directory exists: creating subfolders for each registered users
+    auto iter = registered_users.begin();
+    while(iter != registered_users.end()){
+        string user_storage = iter->first;
+        storage_dir = opendir((SERVER_STORAGE + user_storage).c_str());
+        if(!storage_dir){
+            if(mkdir((SERVER_STORAGE + user_storage).c_str(), 0644)==-1){
+                perror("User storage directory");
+                exit(EXIT_FAILURE);
+            }
+        }
+        closedir(storage_dir);
+        ++iter;
+    }
 }
 
 bool new_online_user(string username){
@@ -261,7 +287,7 @@ void *manage_client(void *arg)
     int fd = *((int *)arg);
     int logged_in = 1;
     int message_type, err;
-    char* username = NULL;
+    string username = "";
 
     // Possible commands
     map<string, int> commands;
@@ -272,62 +298,66 @@ void *manage_client(void *arg)
     commands.insert(pair<string, int>("delete", DELETE));
     commands.insert(pair<string, int>("logout", LOGOUT));
 
-    unsigned char* key = handshake(fd, &username);
+    unsigned char* key = handshake(fd, username);
     if(!key){
-        if (username){
-            disconnect_user((string)username); 
-            delete [] username;
-        }
+        if (!username.empty())
+            disconnect_user(username); 
         close(fd);
         pthread_exit(0); 
     }
-
+    int keylen = EVP_CIPHER_key_length(EVP_aes_128_gcm());
+    int seq_number = 0;
+    command_t msg_type;
     unsigned char *message_tmp = NULL;
     int msg_len;
     vector<string> message;
+    
     while (logged_in && stop==0){
         // <command param1 .... paramN>
-        msg_len = read_message(fd, key, &message_tmp);
-        if (msg_len != CLR_FRAGMENT){
-            if (msg_len<0){
-                // clint crashed
-                // DISCONNECT CLIENT
+        /*msg_type = my_read_message(fd, key, &message_tmp, &seq_number);
+        if (msg_type == OP_FAIL){
+            cout << "Failed to read message... terminating thread" << endl;
+            disconnect_user((string)username);
+            break;
+        }*/
+        msg_type = read_authenticated_msg(fd, key, &seq_number);
+        if (msg_type == OP_FAIL){
+            cout << "Failed to read message... terminating thread" << endl;
+            disconnect_user((string)username);
+            break;
+        }
+        switch (msg_type){
+            case LIST_REQ:{
+                // ----> forse è da reinserire *(message_tmp + CLR_FRAGMENT - 1) = '\0';
+                /*message = extract_params(string((char *)message_tmp));
+                // qui la richiesta è già decifrata
+                if (message.size() == 0)
+                {
+                    delete[] message_tmp;
+                    continue;
+                }*/
+                list(fd, (string)username, key, &seq_number);
                 break;
             }
-            if(message_tmp){
-                delete [] message_tmp;
-            }
-        }
-        *(message_tmp + CLR_FRAGMENT - 1) = '\0';
-        message = extract_params(string((char *)message_tmp));
-        // qui la richiesta è già decifrata
-        if (message.size() == 0)
-        {
-            delete[] message_tmp;
-            continue;
-        }
-        switch (commands[message[0]]){
-            case LIST:
-            {
-                list(fd, (string)username, key);
-                break;
-            }
-            case LOGOUT:
-            {
+            case LOGOUT:{
                 logged_in = 0;
-                disconnect_user((string)username); 
+                if(disconnect_user((string)username))
+                    cout << "User " << username << " disconnected!" << endl;
+                else cout << "Failed to disconnect user " << username << ", terminating" << endl;  
                 break;
             }
             default:
                 break;
         }
-        delete[] message_tmp;
+        //delete[] message_tmp;
     }
+
+    free_crypto(key, keylen);
     close(fd);
     pthread_exit(0);
 }
 
-unsigned char* handshake(int fd, char** clt_username){
+unsigned char* handshake(int fd, string &username){
 
     int err, size;
     unsigned char* clt_nonce = NULL;
@@ -340,7 +370,6 @@ unsigned char* handshake(int fd, char** clt_username){
     EVP_PKEY* prvkey = NULL;
     EVP_PKEY *my_dhkey = NULL;
     X509* srv_cert = NULL;
-
     command_t msg_type;
     bool handshake_finished = false;
     bool error_occurred = false;
@@ -362,13 +391,19 @@ unsigned char* handshake(int fd, char** clt_username){
                 err = readn(fd, clt_nonce, NONCE_LEN);
                 if(err <= 0) { error_occurred = true; break; }
 
-                NEW(*clt_username, new char[USRNM_LEN], "client username");
-                err = readn(fd, *clt_username, USRNM_LEN);
+                int username_len;
+                err = readn(fd, &username_len, sizeof(int));
                 if(err <= 0) { error_occurred = true; break; }
+                cout << "Received " << username_len << endl;
+                char* clt_username;
+                NEW(clt_username, new char[(username_len+1)], "client username");
+                err = readn(fd, clt_username, username_len);
+                if(err <= 0) { error_occurred = true; break; }
+                clt_username[username_len] = '\0';
                 // USERNAME SANIFICATION
-                *clt_username[USRNM_LEN-1] = '\0';
+                username.append(clt_username);
 
-                if (!new_online_user((string)*clt_username)){
+                if (!new_online_user(username)){
                     // user not registered or already online
                     msg_type = HANDSHAKE_ERR;
                     error_occurred = true; 
@@ -395,7 +430,7 @@ unsigned char* handshake(int fd, char** clt_username){
                 BIO_dump_fp (stdout, (const char *)clt_nonce, NONCE_LEN);
                 printf("Server nonce: \n");
                 BIO_dump_fp (stdout, (const char *)srv_nonce, NONCE_LEN);
-                printf("Client username: \n%s\n", *clt_username);
+                cout << "Client username: " << username << endl;
                 fflush(NULL);
 
                 /* ------------------------------------------------------------------------------------ */
@@ -591,7 +626,7 @@ unsigned char* handshake(int fd, char** clt_username){
 
                 // read client rsa public key
                 // First read server privkey
-                string path = registered_users.at((string)*clt_username);
+                string path = registered_users.at(username);
                 FILE* clt_rsa_pubkey_file = fopen(path.c_str(), "r");
                 if(!clt_rsa_pubkey_file){ 
                     cout << "Errore rsa pubkey file" << endl;
@@ -729,31 +764,51 @@ vector<string> extract_params(string message){
     return request;
 }
 
-void list(int fd, string username, unsigned char *key){
-    // Retrieve USERNAME
+void list(int fd, string username, unsigned char *key, int* seq_number){
     string path = SERVER_STORAGE + username + "/";
-    string files = "";
+    vector<string> files;
     DIR *dir;
     struct dirent *diread;
-
-    if ((dir = opendir(path.c_str())) != nullptr)
-    {
-        while ((diread = readdir(dir)) != nullptr)
-        {
-            if (strncmp(diread->d_name, ".", 1) != 0 && strncmp(diread->d_name, "..", 2) != 0)
-            {
-                files += diread->d_name;
-                files += " ";
+    int err, nfiles = 0;
+    if ((dir = opendir(path.c_str())) != NULL){
+        while ((diread = readdir(dir)) != NULL){
+            if (strncmp(diread->d_name, ".", 1) != 0 && strncmp(diread->d_name, "..", 2) != 0){
+                files.push_back(diread->d_name);
+                nfiles++;
             }
         }
         closedir(dir);
     }
-    else
-    {
+    else{
         perror("opendir");
+        // Manage error message
+        /*if (dir == NULL) {
+        id = 8; //ID di errore 
+        plaintext = std::string("Cartella non trovata");
+        plaintext.resize(SIZE_FILENAME);
+        if(!send_std_packet(plaintext,key,sd,counter,id,1)){
+            #pragma optimize("", off)
+            memset(key, 0, EVP_CIPHER_key_length(EVP_aes_128_gcm()));
+            #pragma optimize("", on)
+            free(key);
+            disconnect(sd);
+        }
+        return;
+    }*/
         return;
     }
+    
+    command_t msg_type = LIST_RSP;
+    auto iter = files.begin();
+    while(nfiles > 0){
+        if(nfiles == 1) msg_type = LIST_DONE;
+        err = send_message(fd, key, msg_type, *iter, seq_number);
+        if (err == 0){
+            // fail to send message
+        }
+        iter++;
+        nfiles--;
+    }
 
-    // send list
-    send_message(fd, key, (unsigned char *)files.c_str());
+    return;
 }

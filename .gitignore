@@ -7,10 +7,11 @@ Server/class_template.cpp
 Server/Cloud*
 Server/CryptoManager.cpp
 Server/server
+Server/prova
 
 Common/Packet*
 
 Client/.vscode
-Client/Alice
-Client/Bob
 Client/client
+Client/alice/
+Client/bob/

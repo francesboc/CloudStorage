@@ -6,16 +6,17 @@
 #include <unistd.h>
 #include <netinet/in.h>
 #include <arpa/inet.h>
+#include <vector>
 #include "../Common/utils.h"
 #include "../Common/crypto.h"
 #include <fstream>
 #include <map>
 
 #define PORT 4333
-#define USER_PATH "./Alice/"
+#define USER_PATH "./"
 
-void list_command(int fd, unsigned char* key);
-void logout(int fd, unsigned char* key);
+int list_command(int fd, unsigned char* key, int* seq_number);
+int logout(int fd, unsigned char* key, int* seq_number);
 void canonicalize(string s1);
 bool check_strings(string s1);
 
@@ -51,10 +52,6 @@ int main(){
         } 
     }
 
-    // TO REMOVE
-    //unsigned char key[] = "1234567890123456";
-    //unsigned char iv[]  = "123456780912";
-
     // Possible commands
     map<string,int> commands;
     commands.insert(pair<string,int>("list",LIST));
@@ -68,29 +65,35 @@ int main(){
     cout << "Enter your username: ";
     getline(cin, username);
     if(!cin) { cerr << "Error during input\n"; exit(1); }
-    //writen(client_skt, (char*)username.c_str(), username.size());
+    // SANITAZE USERNAME
     unsigned char* key = handshake(client_skt, username);
     if (!key) {
         close(client_skt);
         return 0;
     }
-    cout << "Connected!" << endl;
+    int keylen = EVP_CIPHER_key_length(EVP_aes_128_gcm());
+    int seq_number = 0;
+
+    cout << "\nHandshake successful. Connected!" << endl;
 
     int logged_in = 1;
     while(logged_in){
         cout << "Enter command: ";
         getline(cin, command);
         if(!cin) { cerr << "Error during input\n"; exit(1); }
-
+        // SANITIZE COMMAND
         switch(commands[command]) {
             case LIST:{
-                // code block
                 cout << "List command inserted" << endl;
-                list_command(client_skt, key);
+                int err = list_command(client_skt, key, &seq_number);
+                // check errors
                 break;
             }
             case LOGOUT:{
-                logout(client_skt,key);
+                int err = send_authenticated_msg(client_skt, key, LOGOUT, &seq_number);
+                if(err==0){
+                    cout << "Cannot send logout message, terminating" << endl;
+                }
                 logged_in = 0;
                 break;
             }
@@ -100,6 +103,7 @@ int main(){
                 // code block
         }
     }
+    free_crypto(key, keylen);
     close(client_skt);
     return 0;
 }
@@ -131,8 +135,15 @@ unsigned char* handshake(int fd, string username){
         delete [] clt_nonce;
         return NULL;
     }
+    int username_size = username.size();
+    cout << "Sent " << username_size << endl;
+    err = writen(fd, &username_size, sizeof(int));
+    if (err <= 0){
+        delete [] clt_nonce;
+        return NULL;
+    }
 
-    err = writen(fd, (void*)username.c_str(), USRNM_LEN);
+    err = writen(fd, (void*)username.c_str(), username_size);
     if (err <= 0){
         delete [] clt_nonce;
         return NULL;
@@ -222,7 +233,7 @@ unsigned char* handshake(int fd, string username){
                 //BIO_dump_fp (stdout, (const char *)signature, signature_len);
 
                 // Load the CA's certificate
-                string cacert_file_name= USER_PATH + (string)"FoundationsOfCybersecurity_cert.pem";
+                string cacert_file_name= USER_PATH + username + (string)"/FoundationsOfCybersecurity_cert.pem";
                 FILE* cacert_file = fopen(cacert_file_name.c_str(), "r");
                 if(!cacert_file){ 
                     cerr << "Error: cannot open file '" << cacert_file_name << "' (missing?)\n";
@@ -238,7 +249,7 @@ unsigned char* handshake(int fd, string username){
                 }
                 
                 // load the CRL:
-                string crl_file_name= USER_PATH + (string)"FoundationsOfCybersecurity_crl.pem";
+                string crl_file_name= USER_PATH + username + (string)"/FoundationsOfCybersecurity_crl.pem";
                 FILE* crl_file = fopen(crl_file_name.c_str(), "r");
                 if(!crl_file){ 
                     cerr << "Error: cannot open file '" << crl_file_name << "' (missing?)\n";
@@ -332,7 +343,7 @@ unsigned char* handshake(int fd, string username){
                 //BIO_dump_fp (stdout, (const char *)pubkey_buf, pubkey_buf_len);
 
                 // First read client privkey
-                string path = USER_PATH + (string)"alice_prvkey.pem";
+                string path = USER_PATH + username +"/" + username + "_prvkey.pem";
                 FILE* prvkey_file = fopen(path.c_str(), "r");
                 if(!prvkey_file){ 
                     cout << "Errore prvkey file" << endl;
@@ -483,27 +494,43 @@ unsigned char* handshake(int fd, string username){
     return shared_key;
 }
 
-// Da rivedere la struttura del messaggio inviato
-void list_command(int fd, unsigned char* key){
+int list_command(int fd, unsigned char* key, int* seq_number){
+    int nmessages;
+    vector<string> files;
 
-    unsigned char msg[] = "list";
-    int pt_len = sizeof(msg);
-
-    send_message(fd, key, msg);
-
-    unsigned char* response = NULL;
-    // Get server response
-    if (read_message(fd, key, &response) != CLR_FRAGMENT)
-        cout << "FAIL retrieve list" << endl;
+    // Sending request for file listing
+    int err = send_authenticated_msg(fd, key, LIST_REQ, seq_number);
+    if(err == 0){
+        cout << "Fail to send list command" << endl;
+        return 0;
+    }
     
-    cout << response << endl;
-}
-
-void logout(int fd, unsigned char* key){
-    unsigned char msg[] = "logout";
-    int pt_len = sizeof(msg);
-    
-    send_message(fd, key, msg);
+    command_t msg_type;
+    string plaintext = "";
+    do{
+        // Get server response with the number of message to read
+        msg_type = read_message(fd, key, plaintext, seq_number);
+        switch(msg_type){
+            case LIST_RSP:{
+                files.push_back(plaintext);
+                break;
+            }
+            case LIST_DONE:{
+                files.push_back(plaintext);
+                // Printing files
+                auto iter = files.begin();
+                while(iter != files.end()){
+                    cout << "-> " << *iter << endl;
+                    iter++;
+                }
+                break;
+            }
+            default:
+                break;
+        }
+    } while(msg_type != LIST_DONE);
+    //msg_type = read_authenticated_msg(fd, key, &seq_number);
+    return 1;
 }
 
 void canonicalize(string s1){

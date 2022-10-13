@@ -117,6 +117,95 @@ int gcm_decrypt(unsigned char *ciphertext, int ciphertext_len,
     }
 }
 
+int gcm_authenticate(unsigned char* aad, int aad_len,
+                     unsigned char* key, unsigned char* iv,
+                     unsigned char* tag) {
+    EVP_CIPHER_CTX *ctx;
+    unsigned char* ciphertext;
+    int len=0;
+    // Create and initialise the context
+    if(!(ctx = EVP_CIPHER_CTX_new())){
+        FAIL("New cipher context");
+        return 0;
+    }
+    // Initialise the encryption operation.
+    if(1 != EVP_EncryptInit(ctx, EVP_aes_128_gcm(), key, iv)){
+        FAIL("Encrypt init");
+        EVP_CIPHER_CTX_free(ctx);
+        return 0;
+    }
+
+    //Provide any AAD data. This can be called zero or more times as required
+    if(1 != EVP_EncryptUpdate(ctx, NULL, &len, aad, aad_len)){
+        FAIL("Encrypt update aad");
+        EVP_CIPHER_CTX_free(ctx);
+        return 0;
+    }
+
+	//Finalize Encryption
+    if(1 != EVP_EncryptFinal(ctx, ciphertext, &len)){
+        FAIL("Encrypt final");
+        EVP_CIPHER_CTX_free(ctx);
+        return 0;
+    }
+
+    /* Get the tag */
+    if(1 != EVP_CIPHER_CTX_ctrl(ctx, EVP_CTRL_AEAD_GET_TAG, 16, tag)){
+        FAIL("Encrypt ctrl");
+        EVP_CIPHER_CTX_free(ctx);
+        return 0;
+    }
+    /* Clean up */
+    EVP_CIPHER_CTX_free(ctx);
+    return 1;
+}
+
+int gcm_verify(unsigned char *aad, int aad_len, 
+               unsigned char *key, unsigned char *iv, unsigned char *tag) {
+    EVP_CIPHER_CTX *ctx;
+    unsigned char* plaintext;
+    int len;
+    int ret;
+    /* Create and initialize the context */
+    if(!(ctx = EVP_CIPHER_CTX_new())){
+        FAIL("Decrypt new ctx");
+        return 0;
+    }
+    if(!EVP_DecryptInit(ctx, EVP_aes_128_gcm(), key, iv)){
+        FAIL("Decrypt init");
+        EVP_CIPHER_CTX_free(ctx);
+        return 0;
+    }
+	//Provide any AAD data.
+    if(!EVP_DecryptUpdate(ctx, NULL, &len, aad, aad_len)){
+        FAIL("Decrypt update aad");
+        EVP_CIPHER_CTX_free(ctx);
+        return 0;
+    }
+
+    /* Set expected tag value. Works in OpenSSL 1.0.1d and later */
+    if(!EVP_CIPHER_CTX_ctrl(ctx, EVP_CTRL_AEAD_SET_TAG, 16, tag)){
+        FAIL("Decrypt ctrl");
+        EVP_CIPHER_CTX_free(ctx);
+        return 0;
+    }
+    /*
+     * Finalise the decryption. A positive return value indicates success,
+     * anything else is a failure - the plaintext is not trustworthy.
+     */
+    ret = EVP_DecryptFinal(ctx, plaintext, &len);
+
+    /* Clean up */
+    EVP_CIPHER_CTX_cleanup(ctx);
+    EVP_CIPHER_CTX_free(ctx);
+    if(ret > 0) {
+        return 1;
+    } else {
+        FAIL("Decrypt final");
+        return 0;
+    }
+
+}
 int sign(EVP_PKEY* priv_key, unsigned char* buf, int buf_len, unsigned char* signature){
     unsigned int signature_len = 0;
     EVP_MD_CTX* md_ctx = EVP_MD_CTX_new();
