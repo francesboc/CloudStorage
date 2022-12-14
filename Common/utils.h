@@ -35,15 +35,26 @@ typedef enum {
     /* ------------------------------------------ */
     /*      operazioni che il server deve gestire */
     /* ------------------------------------------ */
-    UPLOAD          = 0,   /// richiesta di registrazione di un ninckname
+    UPLOAD          = 12,
+    UPLOAD_REQ      = 0,   /// richiesta di registrazione di un ninckname
+    UPLOAD_FRGM     = 10,
+    UPLOAD_END      = 11,
+    UPLOAD_DONE     = 13,
     DOWNLOAD        = 1,   /// richiesta di connessione di un client
     DELETE          = 2,   /// richiesta di invio di un messaggio testuale ad un nickname o groupname
+    DELETE_REQ      = 101,
+    DELETE_CONFIRM  = 102,
+    DELETE_OK       = 103,
+    DELETE_ABORT    = 104,
     LIST            = 3,   /// richiesta di invio di un messaggio testuale a tutti gli utenti 
     LIST_REQ        = 6,
     LIST_RSP        = 7,
     LIST_DONE       = 8, 
-    RENAME          = 4,   /// richiesta di invio di un file ad un nickname o groupname
+    RENAME          = 201,
+    RENAME_REQ      = 202,
+    RENAME_OK       = 203,   /// richiesta di invio di un file ad un nickname o groupname
     LOGOUT          = 5,   /// richiesta di recupero di un file
+    HELP            = 105,
     /* ------------------------------------------ */
     /*    messaggi inviati dal server             */
     /* ------------------------------------------ */
@@ -56,12 +67,14 @@ typedef enum {
     /*    error codes                             */
     /* ------------------------------------------ */
     ERROR_MSGS      = 40,
+    SRV_ERROR       = 401,
+    RENEW_KEY       = 402,
     OP_FAIL         = 41,  // generico messaggio di fallimento
     CLIENT_EOF      = 42,  // client reach EOF or crashed
     OP_NICK_ALREADY = 26,  // nickname o groupname gia' registrato
     OP_NICK_UNKNOWN = 27,  // nickname non riconosciuto
     OP_MSG_TOOLONG  = 28,  // messaggio con size troppo lunga
-    OP_NO_SUCH_FILE = 29,  // il file richiesto non esiste
+    NO_SUCH_FILE = 29,  // il file richiesto non esiste
 } command_t;
 
 /**
@@ -70,8 +83,12 @@ typedef enum {
 
 int readn(long fd, void *buf, size_t size);
 int writen(long fd, void *buf, size_t size);
+int send_data(int fd, unsigned char* message, int len);
+int read_data(int fd, unsigned char** message, int* len);
 command_t read_message(int fd, unsigned char* key, string &plaintext, int *seq_number);
 int send_message(int fd, unsigned char* key, command_t msg_type, string message, int* seq_number);
+int send_data_message(int fd, unsigned char* key, command_t msg_type, unsigned char* plaintext, int pt_len, int* seq_number);
+command_t read_data_message(int fd, unsigned char* key, unsigned char* plaintext, int* pt_len, int *seq_number);
 
 command_t my_read_message(int fd, unsigned char* key, unsigned char** message, int* seq_number, int* nmessages);
 int my_send_message(int fd, unsigned char* key, command_t msg_type, string message, int* seq_number, int nmessages);

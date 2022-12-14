@@ -19,26 +19,26 @@ int gcm_encrpyt(unsigned char *plaintext, int plaintext_len,
     // Create and initialise the context
     if(!(ctx = EVP_CIPHER_CTX_new())){
         FAIL("New cipher context");
-        return 0;
+        return -1;
     }
     // Initialise the encryption operation.
     if(1 != EVP_EncryptInit(ctx, EVP_aes_128_gcm(), key, iv)){
         FAIL("Encrypt init");
         EVP_CIPHER_CTX_free(ctx);
-        return 0;
+        return -1;
     }
 
     //Provide any AAD data. This can be called zero or more times as required
     if(1 != EVP_EncryptUpdate(ctx, NULL, &len, aad, aad_len)){
         FAIL("Encrypt update aad");
         EVP_CIPHER_CTX_free(ctx);
-        return 0;
+        return -1;
     }
 
     if(1 != EVP_EncryptUpdate(ctx, ciphertext, &len, plaintext, plaintext_len)){
         FAIL("Encrypt update");
         EVP_CIPHER_CTX_free(ctx);
-        return 0;
+        return -1;
     }
     ciphertext_len = len;
 	//Finalize Encryption
@@ -52,7 +52,7 @@ int gcm_encrpyt(unsigned char *plaintext, int plaintext_len,
     if(1 != EVP_CIPHER_CTX_ctrl(ctx, EVP_CTRL_AEAD_GET_TAG, 16, tag)){
         FAIL("Encrypt ctrl");
         EVP_CIPHER_CTX_free(ctx);
-        return 0;
+        return -1;
     }
     /* Clean up */
     EVP_CIPHER_CTX_free(ctx);
@@ -72,31 +72,31 @@ int gcm_decrypt(unsigned char *ciphertext, int ciphertext_len,
     /* Create and initialise the context */
     if(!(ctx = EVP_CIPHER_CTX_new())){
         FAIL("Decrypt new ctx");
-        return 0;
+        return -1;
     }
     if(!EVP_DecryptInit(ctx, EVP_aes_128_gcm(), key, iv)){
         FAIL("Decrypt init");
         EVP_CIPHER_CTX_free(ctx);
-        return 0;
+        return -1;
     }
 	//Provide any AAD data.
     if(!EVP_DecryptUpdate(ctx, NULL, &len, aad, aad_len)){
         FAIL("Decrypt update aad");
         EVP_CIPHER_CTX_free(ctx);
-        return 0;
+        return -1;
     }
 	//Provide the message to be decrypted, and obtain the plaintext output.
     if(!EVP_DecryptUpdate(ctx, plaintext, &len, ciphertext, ciphertext_len)){
         FAIL("Decrypt update");
         EVP_CIPHER_CTX_free(ctx);
-        return 0;
+        return -1;
     }
     plaintext_len = len;
     /* Set expected tag value. Works in OpenSSL 1.0.1d and later */
     if(!EVP_CIPHER_CTX_ctrl(ctx, EVP_CTRL_AEAD_SET_TAG, 16, tag)){
         FAIL("Decrypt ctrl");
         EVP_CIPHER_CTX_free(ctx);
-        return 0;
+        return -1;
     }
     /*
      * Finalise the decryption. A positive return value indicates success,
@@ -113,7 +113,7 @@ int gcm_decrypt(unsigned char *ciphertext, int ciphertext_len,
         return plaintext_len;
     } else {
         FAIL("Decrypt final");
-        return 0;
+        return -1;
     }
 }
 

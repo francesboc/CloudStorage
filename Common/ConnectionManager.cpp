@@ -69,6 +69,7 @@ int read_data(int fd, unsigned char** message, int* len){
     return 1;
 }
 
+// Deprecated
 int my_send_message(int fd, unsigned char* key, command_t msg_type,
     string message, int* seq_number, int nmessages){
     
@@ -139,6 +140,7 @@ int my_send_message(int fd, unsigned char* key, command_t msg_type,
 
 }
 
+// Deprecated
 command_t my_read_message(int fd, unsigned char* key, unsigned char** message,
  int* seq_number, int* nmessages){
     int err;
@@ -318,7 +320,7 @@ int send_message(int fd, unsigned char* key, command_t msg_type, string message,
     memcpy(aads + sizeof(command_t) + sizeof(int), iv, IV_SIZE);
 
     cphr_len = gcm_encrpyt((unsigned char*)message.c_str(), plain_len, aads, AAD_FRAGMNENT, key, iv, IV_SIZE, cphr_buf, tag_buf);
-    if (cphr_len == 0){
+    if (cphr_len < 0){
         // Error while encrypting
         cout << "Encrypt message fail (occhio alla lunghezza 0)" << endl;
         delete [] cphr_buf;
@@ -397,7 +399,7 @@ command_t read_message(int fd, unsigned char* key, string &plaintext, int *seq_n
     delete [] tag_buf;
     delete [] iv;
     delete [] aads;
-    if (pt_len == 0){
+    if (pt_len < 0){
         // error in decrpytion
         cout << "Decrypt message fail (occhio alla lunghezza 0)" << endl;
         delete [] message;
@@ -410,6 +412,112 @@ command_t read_message(int fd, unsigned char* key, string &plaintext, int *seq_n
     plaintext = (string) chr_message;
     delete [] message;
     delete [] chr_message;
+    *seq_number++;
+    return msg_type;
+}
+
+int send_data_message(int fd, unsigned char* key, command_t msg_type, unsigned char* plaintext, int pt_len, int* seq_number){
+    unsigned char* iv;  NEW(iv, new unsigned char[IV_SIZE], "new iv");
+    generate_random(iv, IV_SIZE);
+
+    int cphr_len = pt_len + 16;
+    int tag_len, err;
+
+    unsigned char* cphr_buf; NEW(cphr_buf, new unsigned char[cphr_len], "new cphr buf");
+    unsigned char* tag_buf; NEW(tag_buf, new unsigned char[TAG_SIZE], "new tag buf");
+    unsigned char* aads; NEW(aads, new unsigned char[AAD_FRAGMNENT], "new aads");
+    memset(aads, 0, AAD_FRAGMNENT);
+    memcpy(aads, &msg_type, sizeof(command_t));
+    memcpy(aads + sizeof(command_t), seq_number, sizeof(int));
+    memcpy(aads + sizeof(command_t) + sizeof(int), iv, IV_SIZE);
+
+    cphr_len = gcm_encrpyt(plaintext, pt_len, aads, AAD_FRAGMNENT, key, iv, IV_SIZE, cphr_buf, tag_buf);
+    if (cphr_len < 0){
+        // Error while encrypting
+        cout << "Encrypt message fail (occhio alla lunghezza 0)" << endl;
+        delete [] cphr_buf;
+        delete [] tag_buf;
+        delete [] aads;
+        delete [] iv;
+        return 0;
+    }
+
+    int request_len = sizeof(command_t) + sizeof(int) + sizeof(int) + IV_SIZE + cphr_len + TAG_SIZE; 
+    unsigned char* request; NEW(request, new unsigned char[request_len], "new request");
+    memcpy(request, &msg_type, sizeof(command_t));
+    memcpy(request + sizeof(command_t), seq_number, sizeof(int));
+    memcpy(request + sizeof(command_t) + sizeof(int), &cphr_len, sizeof(int));
+    memcpy(request + sizeof(command_t) + sizeof(int) + sizeof(int), iv, IV_SIZE);
+    memcpy(request + sizeof(command_t) + sizeof(int) + sizeof(int) + IV_SIZE, cphr_buf, cphr_len);
+    memcpy(request + sizeof(command_t) + sizeof(int) + sizeof(int) + IV_SIZE + cphr_len, tag_buf, TAG_SIZE);
+    
+    // send request with its size
+    err = send_data(fd, request, request_len);
+
+    delete [] cphr_buf;
+    delete [] tag_buf;
+    delete [] request;
+    delete [] iv;
+    delete [] aads;
+    if(err == 0) return 0;
+    *seq_number++;
+    return 1;
+}
+
+command_t read_data_message(int fd, unsigned char* key, unsigned char* plaintext, int* pt_len, int *seq_number){
+    int err, request_len;
+    unsigned char* request;
+
+    err = read_data(fd, &request, &request_len);
+    if(err == 0){
+        cout << "Fail to read request" << endl;
+        delete [] request;
+        return OP_FAIL;
+    }
+
+    unsigned char* tag_buf; NEW(tag_buf, new unsigned char[TAG_SIZE], "new tag buf");
+    unsigned char* iv; NEW(iv, new unsigned char[IV_SIZE], "new iv");
+    unsigned char* aads; NEW(aads, new unsigned char[AAD_FRAGMNENT], "new aads");
+
+    int cphr_len, received_seq_number;
+    command_t msg_type;
+
+    memcpy(&msg_type, request, sizeof(command_t));
+    memcpy(&received_seq_number, request + sizeof(command_t), sizeof(int));
+    memcpy(&cphr_len, request + sizeof(command_t) + sizeof(int), sizeof(int));
+    unsigned char* cphr_buf; NEW(cphr_buf, new unsigned char[cphr_len], "new cphr buf");
+    memcpy(iv, request + sizeof(command_t) + sizeof(int) + sizeof(int), IV_SIZE);
+    memcpy(cphr_buf, request + sizeof(command_t) + sizeof(int) + sizeof(int) + IV_SIZE, cphr_len);
+    memcpy(tag_buf, request + sizeof(command_t) + sizeof(int) + sizeof(int) + IV_SIZE + cphr_len, TAG_SIZE);
+
+    if(*seq_number != received_seq_number){
+        // message reply detected
+        cout << "Different sequence number detected" << endl;
+        delete [] request;
+        return OP_FAIL;
+    }
+    
+    memset(aads, 0, AAD_FRAGMNENT);
+    memcpy(aads, &msg_type, sizeof(command_t));
+    memcpy(aads + sizeof(command_t), seq_number, sizeof(int));
+    memcpy(aads + sizeof(command_t) + sizeof(int), iv, IV_SIZE);
+
+    delete [] request;
+    
+    NEW(plaintext, new unsigned char[cphr_len], "new message");
+    *pt_len = gcm_decrypt(cphr_buf, cphr_len, aads, AAD_FRAGMNENT, tag_buf, key, iv, IV_SIZE, plaintext);
+    
+    delete [] cphr_buf;
+    delete [] tag_buf;
+    delete [] iv;
+    delete [] aads;
+    if (*pt_len < 0){
+        // error in decrpytion
+        cout << "Decrypt message fail (occhio alla lunghezza 0)" << endl;
+        delete [] plaintext;
+        return OP_FAIL;
+    }
+    
     *seq_number++;
     return msg_type;
 }

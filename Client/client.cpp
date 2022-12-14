@@ -14,16 +14,24 @@
 
 #define PORT 4333
 #define USER_PATH "./"
+#define STORAGE_PATH "/storage/"
+#define CA_CERT_PATH "/FoundationsOfCybersecurity_cert.pem"
+#define CA_CRL_PATH "/FoundationsOfCybersecurity_crl.pem"
+#define MAX_FRAGMENT_SIZE 1024
 
 int list_command(int fd, unsigned char* key, int* seq_number);
+void delete_command(int fd, unsigned char* key, int* seq_number);
+void rename_command(int fd, unsigned char* key, int* seq_number);
 int logout(int fd, unsigned char* key, int* seq_number);
 void canonicalize(string s1);
 bool check_strings(string s1);
 
+void show_help_msg();
+
 unsigned char* handshake(int fd, string username);
 
 int main(){
-
+    show_help_msg();
     int client_skt;
     struct sockaddr_in address;
 
@@ -60,6 +68,7 @@ int main(){
     commands.insert(pair<string,int>("rename",RENAME));
     commands.insert(pair<string,int>("delete",DELETE));
     commands.insert(pair<string,int>("logout",LOGOUT));
+    commands.insert(pair<string,int>("help",HELP));
 
     string command, username;
     cout << "Enter your username: ";
@@ -82,6 +91,7 @@ int main(){
         getline(cin, command);
         if(!cin) { cerr << "Error during input\n"; exit(1); }
         // SANITIZE COMMAND
+        // substite \n with \0
         switch(commands[command]) {
             case LIST:{
                 cout << "List command inserted" << endl;
@@ -90,11 +100,27 @@ int main(){
                 break;
             }
             case LOGOUT:{
-                int err = send_authenticated_msg(client_skt, key, LOGOUT, &seq_number);
+                // int err = send_authenticated_msg(client_skt, key, LOGOUT, &seq_number);
+                int err = send_message(client_skt, key, LOGOUT,"", &seq_number);
                 if(err==0){
                     cout << "Cannot send logout message, terminating" << endl;
                 }
                 logged_in = 0;
+                break;
+            }
+            case DELETE:{
+                cout << "Delete command inserted" << endl;
+                delete_command(client_skt, key, &seq_number);
+                // check errors
+                break;
+            }
+            case RENAME:{
+                cout << "Rename command inserted" << endl;
+                rename_command(client_skt, key, &seq_number);
+                break;
+            }
+            case HELP:{
+                show_help_msg();
                 break;
             }
             default:
@@ -110,101 +136,87 @@ int main(){
 
 unsigned char* handshake(int fd, string username){
 
-    int err, size;
+    int err, size, handshake_msg_len;
     unsigned char* srv_nonce = NULL; 
     unsigned char* shared_key = NULL;
     unsigned char* srv_cert_buf = NULL;
     unsigned char* srv_pubkey_buf = NULL;
+    unsigned char* handshake_msg = NULL;
     X509* srv_cert = NULL;
     EVP_PKEY* srv_dh_pubkey = NULL;
     EVP_PKEY *my_dhkey = NULL;
+    command_t msg_type;
 
     /* ------------------------------------------------------------------------------------ */
     /* FIRST PHASE: Client sends nonce and username                                         */
     /* ------------------------------------------------------------------------------------ */
 
-    command_t hs_req = HANDSHAKE_REQ;
-    err = writen(fd, &hs_req, sizeof(command_t));
-    if (err <= 0) return NULL;
-
     unsigned char* clt_nonce; NEW(clt_nonce, new unsigned char[NONCE_LEN], "client nonce");
     generate_random(clt_nonce, NONCE_LEN);
+    printf("Client nonce: \n");
+    BIO_dump_fp (stdout, (const char *)clt_nonce, NONCE_LEN);
 
-    err = writen(fd, clt_nonce, NONCE_LEN);
-    if (err <= 0){
-        delete [] clt_nonce;
-        return NULL;
-    }
     int username_size = username.size();
-    cout << "Sent " << username_size << endl;
-    err = writen(fd, &username_size, sizeof(int));
-    if (err <= 0){
+    cout << "Sent username len: " << username_size << endl;
+    msg_type = HANDSHAKE_PH1;
+    handshake_msg_len = sizeof(command_t) + NONCE_LEN + sizeof(int) + username_size; 
+    NEW(handshake_msg, new unsigned char[handshake_msg_len], "phase1: handshake msg");
+    memcpy(handshake_msg, &msg_type, sizeof(command_t));
+    memcpy(handshake_msg + sizeof(command_t), clt_nonce, NONCE_LEN);
+    memcpy(handshake_msg + sizeof(command_t) + NONCE_LEN, &username_size, sizeof(int));
+    memcpy(handshake_msg + sizeof(command_t) + NONCE_LEN + sizeof(int), username.c_str(), username_size);
+
+    err = send_data(fd, handshake_msg, handshake_msg_len);
+    delete [] handshake_msg;
+    if(err == 0){
         delete [] clt_nonce;
         return NULL;
     }
-
-    err = writen(fd, (void*)username.c_str(), username_size);
-    if (err <= 0){
-        delete [] clt_nonce;
-        return NULL;
-    }
-
-    command_t msg_type;
+    
     bool handshake_finished = false;
     bool error_occurred = false;
     
     while(!handshake_finished && !error_occurred){
-        err = readn(fd, &msg_type, sizeof(command_t));
-        if(err <= 0) { error_occurred = true; break; }
+        err = read_data(fd, &handshake_msg, &handshake_msg_len);
+        if(err == 0) { error_occurred = true; break; }
+        // Get message type
+        memcpy(&msg_type, handshake_msg, sizeof(command_t));
+        cout << "Received command: " << msg_type << endl;
+        //err = readn(fd, &msg_type, sizeof(command_t));
+        //if(err <= 0) { error_occurred = true; break; }
         switch(msg_type) {
-            case HANDSHAKE_PH1:{
-
-                /* ------------------------------------------------------------------------------------ */
-                /* FIRST PHASE (continue): Client receives server nonce                                 */
-                /* ------------------------------------------------------------------------------------ */
-
-                NEW(srv_nonce, new unsigned char[NONCE_LEN], "server nonce");
-                err = readn(fd, srv_nonce, NONCE_LEN);
-                if (err <= 0) { error_occurred = true; break; }
-
-                printf("------------------------ FASE 1 ------------------------\n");
-                printf("Client nonce: \n");
-                BIO_dump_fp (stdout, (const char *)clt_nonce, NONCE_LEN);
-                printf("Server nonce: \n");
-                BIO_dump_fp (stdout, (const char *)srv_nonce, NONCE_LEN);
-                break;
-            }
             case HANDSHAKE_PH2:{
-                
+
                 /* ------------------------------------------------------------------------------------ */
                 /* SECOND PHASE: server exchange                                                        */
                 /* Client receives srv certificate, ephimeral srv pub key, signature                    */
                 /* Client retrieve public key from srv certificate, verify the signature                */
                 /* ------------------------------------------------------------------------------------ */
 
-                printf("------------------------ FASE 2 ------------------------\n");
-                
-                int srv_cert_len;
-                err = readn(fd, &srv_cert_len, sizeof(int));
-                if (err <= 0) { error_occurred = true; break; }
+                NEW(srv_nonce, new unsigned char[NONCE_LEN], "server nonce");
+                memcpy(srv_nonce, handshake_msg + sizeof(command_t), NONCE_LEN);
+
+                printf("Server nonce: \n");
+                BIO_dump_fp (stdout, (const char *)srv_nonce, NONCE_LEN);
+
+                unsigned char* received_clt_nonce;
+                NEW(received_clt_nonce, new unsigned char[NONCE_LEN], "received clt nonce");
+
+                // Get Client.Nonce for freshness
+                memcpy(received_clt_nonce, handshake_msg + sizeof(command_t) + NONCE_LEN, NONCE_LEN);
+                // need to check for received client nonce COMPARE THEM
+
+                // Get server certificate
+                int srv_cert_len, srv_pubkey_len, signature_len;
+                memcpy(&srv_cert_len, handshake_msg + sizeof(command_t) + (NONCE_LEN*2), sizeof(int));
+                memcpy(&srv_pubkey_len, handshake_msg + sizeof(command_t) + (NONCE_LEN*2) + sizeof(int), sizeof(int));
+                memcpy(&signature_len, handshake_msg + sizeof(command_t) + (NONCE_LEN*2) + (sizeof(int)*2), sizeof(int));
 
                 NEW(srv_cert_buf, new unsigned char[srv_cert_len], "server certificate");
-                err = readn(fd, srv_cert_buf, srv_cert_len);
-                if (err <= 0) { error_occurred = true; break; }
-
-                //printf("Server certificate: \n");
-                //BIO_dump_fp (stdout, (const char *)srv_cert_buf, srv_cert_len);
-
-                int srv_pubkey_len;
-                err = readn(fd, &srv_pubkey_len, sizeof(int));
-                if (err <= 0) { error_occurred = true; break; }
+                memcpy(srv_cert_buf, handshake_msg + sizeof(command_t) + (NONCE_LEN*2) + (sizeof(int)*3), srv_cert_len);
 
                 NEW(srv_pubkey_buf, new unsigned char[srv_pubkey_len], "server public key");
-                err = readn(fd, srv_pubkey_buf, srv_pubkey_len);
-                if (err <= 0) { error_occurred = true; break; }
-
-                //printf("Server DH Pubkey: \n");
-                //BIO_dump_fp (stdout, (const char *)srv_pubkey_buf, srv_pubkey_len);
+                memcpy(srv_pubkey_buf, handshake_msg + sizeof(command_t) + (NONCE_LEN*2) + (sizeof(int)*3) + srv_cert_len, srv_pubkey_len);
 
                 srv_cert = deserialize_certificate(srv_cert_buf, srv_cert_len);
                 if(!srv_cert){ 
@@ -218,22 +230,16 @@ unsigned char* handshake(int fd, string username){
                     error_occurred = true; break;
                 }
 
-                // Read signature
-                int signature_len;
-                err = readn(fd, &signature_len, sizeof(int));
-                if (err <= 0) { error_occurred = true; break; }
                 unsigned char* signature; NEW(signature, new unsigned char[signature_len], "server signature");
-                err = readn(fd, signature, signature_len);
-                if (err <= 0) { 
-                    delete [] signature;
-                    error_occurred = true; break; 
-                }
+                memcpy(signature, handshake_msg + sizeof(command_t) + (NONCE_LEN*2) + (sizeof(int)*3) + srv_cert_len + srv_pubkey_len, signature_len);
+                
+                delete [] handshake_msg;
 
-                //printf("Server signature: \n");
-                //BIO_dump_fp (stdout, (const char *)signature, signature_len);
+                printf("Server signature: \n");
+                BIO_dump_fp (stdout, (const char *)signature, signature_len);
 
                 // Load the CA's certificate
-                string cacert_file_name= USER_PATH + username + (string)"/FoundationsOfCybersecurity_cert.pem";
+                string cacert_file_name = USER_PATH + username + CA_CERT_PATH;
                 FILE* cacert_file = fopen(cacert_file_name.c_str(), "r");
                 if(!cacert_file){ 
                     cerr << "Error: cannot open file '" << cacert_file_name << "' (missing?)\n";
@@ -249,7 +255,7 @@ unsigned char* handshake(int fd, string username){
                 }
                 
                 // load the CRL:
-                string crl_file_name= USER_PATH + username + (string)"/FoundationsOfCybersecurity_crl.pem";
+                string crl_file_name = USER_PATH + username + CA_CRL_PATH;
                 FILE* crl_file = fopen(crl_file_name.c_str(), "r");
                 if(!crl_file){ 
                     cerr << "Error: cannot open file '" << crl_file_name << "' (missing?)\n";
@@ -271,26 +277,22 @@ unsigned char* handshake(int fd, string username){
                     cout << "ERRORE Certificate verification FAILED" << endl;
                     delete [] signature;
                     error_occurred = true;
-                    msg_type = HANDSHAKE_ERR;
-                    string error_msg = "Certificate verification FAILED";
-                    int error_size = error_msg.size()+1;
-                    writen(fd, &msg_type, sizeof(command_t));
-                    writen(fd, &error_size, sizeof(int));
-                    writen(fd, (void*)error_msg.c_str(), error_size);
+                    //msg_type = HANDSHAKE_ERR;
+                    //string error_msg = "Certificate verification FAILED";
+                    //int error_size = error_msg.size()+1;
+                    //writen(fd, &msg_type, sizeof(command_t));
+                    //writen(fd, &error_size, sizeof(int));
+                    //writen(fd, (void*)error_msg.c_str(), error_size);
                     break;
                 }
 
                 cout << "Certificate verification: OK" << endl;
                 // We need to verify signature
-                int to_verify_len = srv_cert_len + srv_pubkey_len + (NONCE_LEN*2);
+                int to_verify_len = srv_pubkey_len + (NONCE_LEN*2);
                 unsigned char* to_verify; NEW(to_verify, new unsigned char[to_verify_len], "to_verify buffer");
-                memcpy(to_verify, srv_cert_buf, srv_cert_len);
-                memcpy(to_verify + srv_cert_len, srv_pubkey_buf, srv_pubkey_len);
-                memcpy(to_verify + srv_cert_len + srv_pubkey_len, clt_nonce, NONCE_LEN);
-                memcpy(to_verify + srv_cert_len + srv_pubkey_len + NONCE_LEN, srv_nonce, NONCE_LEN);
-
-                //printf("Plain signature: \n");
-                //BIO_dump_fp (stdout, (const char *)to_verify, to_verify_len);
+                memcpy(to_verify, srv_pubkey_buf, srv_pubkey_len);
+                memcpy(to_verify + srv_pubkey_len, clt_nonce, NONCE_LEN);
+                memcpy(to_verify + srv_pubkey_len + NONCE_LEN, srv_nonce, NONCE_LEN);
 
                 // extract pubic key from srv certificate
                 EVP_PKEY* srv_cert_pubkey = X509_get_pubkey(srv_cert);
@@ -307,12 +309,12 @@ unsigned char* handshake(int fd, string username){
                     delete [] to_verify;
                     EVP_PKEY_free(srv_cert_pubkey);
                     error_occurred = true;
-                    msg_type = HANDSHAKE_ERR;
-                    string error_msg = "Signature verification FAILED";
-                    int error_size = error_msg.size()+1;
-                    writen(fd, &msg_type, sizeof(command_t));
-                    writen(fd, &error_size, sizeof(int));
-                    writen(fd, (void*)error_msg.c_str(), error_size);
+                    //msg_type = HANDSHAKE_ERR;
+                    //string error_msg = "Signature verification FAILED";
+                    //int error_size = error_msg.size()+1;
+                    //writen(fd, &msg_type, sizeof(command_t));
+                    //writen(fd, &error_size, sizeof(int));
+                    //writen(fd, (void*)error_msg.c_str(), error_size);
                     break;
                 }
 
@@ -323,7 +325,11 @@ unsigned char* handshake(int fd, string username){
                 delete [] srv_pubkey_buf; srv_pubkey_buf = NULL;
                 EVP_PKEY_free(srv_cert_pubkey);
 
-                printf("------------------------ FASE 3 ------------------------\n");
+                /* ------------------------------------------------------------------------------------ */
+                /* THIRD PHASE: server exchange                                                        */
+                /* Client receives srv certificate, ephimeral srv pub key, signature                    */
+                /* Client retrieve public key from srv certificate, verify the signature                */
+                /* ------------------------------------------------------------------------------------ */
 
                 // Generate ephimeral DH
                 my_dhkey = generate_pubkey();
@@ -384,37 +390,22 @@ unsigned char* handshake(int fd, string username){
                 //BIO_dump_fp (stdout, (const char *)to_sign, to_sign_len);
 
                 msg_type = HANDSHAKE_PH3;
-                err = writen(fd, &msg_type, sizeof(command_t));
-                if (err <= 0){
-                    delete [] pubkey_buf;
-                    delete [] signature;
-                    error_occurred = true; break; 
-                }
-                // Finally send: pubkey, signature
-                err = writen(fd, &pubkey_buf_len, sizeof(int));
-                if (err <= 0){
-                    delete [] pubkey_buf;
-                    delete [] signature;
-                    error_occurred = true; break; 
-                }
-                err = writen(fd, pubkey_buf, pubkey_buf_len);
-                if (err <= 0){
-                    delete [] pubkey_buf;
-                    delete [] signature;
-                    error_occurred = true; break; 
-                }
-                delete [] pubkey_buf;
+                handshake_msg_len = sizeof(command_t) + NONCE_LEN + (sizeof(int)*2) + pubkey_buf_len + signature_len;
+                NEW(handshake_msg, new unsigned char[handshake_msg_len], "phase3: handshake msg");
+                memcpy(handshake_msg, &msg_type, sizeof(command_t));
+                memcpy(handshake_msg + sizeof(command_t), srv_nonce, NONCE_LEN);
+                memcpy(handshake_msg + sizeof(command_t) + NONCE_LEN, &pubkey_buf_len, sizeof(int));
+                memcpy(handshake_msg + sizeof(command_t) + NONCE_LEN + sizeof(int), &signature_len, sizeof(int));
+                memcpy(handshake_msg + sizeof(command_t) + NONCE_LEN + (sizeof(int)*2), pubkey_buf, pubkey_buf_len);
+                memcpy(handshake_msg + sizeof(command_t) + NONCE_LEN + (sizeof(int)*2) + pubkey_buf_len, signature, signature_len);
 
-                err = writen(fd, &signature_len, sizeof(int));
-                if (err <= 0){
-                    delete [] signature;
-                    error_occurred = true; break; 
+                err = send_data(fd, handshake_msg, handshake_msg_len);
+                if (err == 0){
+                    // manage errors
                 }
-                err = writen(fd, signature, signature_len);
-                if (err <= 0){
-                    delete [] signature;
-                    error_occurred = true; break; 
-                }
+
+                delete [] handshake_msg;                
+                delete [] pubkey_buf;
                 delete [] signature;
 
                 printf("------------------------ FASE 4 ------------------------\n");
@@ -456,19 +447,16 @@ unsigned char* handshake(int fd, string username){
             case HANDSHAKE_ERR:{
                 cout << "Something went wrong during handshake:" << endl;
                 
-                err = readn(fd, &size, sizeof(int));
-                if (err <= 0){ error_occurred = true; break; }
+                int reason_len;
+                memcpy(&reason_len, handshake_msg + sizeof(command_t), sizeof(int));
 
-                char *reason; NEW(reason, new char[size], "reason");
-                err = readn(fd, reason, size);
-                if (err <= 0){
-                    delete [] reason;
-                    error_occurred = true; break;
-                }
-
-                reason[size-1] = '\0';
+                char *reason; NEW(reason, new char[reason_len+1], "reason msg");
+                memcpy(reason, handshake_msg + sizeof(command_t)+ sizeof(int), reason_len);
+                
+                reason[size] = '\0';
                 cout << reason << endl;
                 delete [] reason;
+                delete [] handshake_msg;
                 error_occurred = true; 
                 break;
             }
@@ -498,39 +486,222 @@ int list_command(int fd, unsigned char* key, int* seq_number){
     int nmessages;
     vector<string> files;
 
-    // Sending request for file listing
-    int err = send_authenticated_msg(fd, key, LIST_REQ, seq_number);
+    int err = send_message(fd, key, LIST_REQ,"", seq_number);
     if(err == 0){
         cout << "Fail to send list command" << endl;
         return 0;
     }
-    
-    command_t msg_type;
+
+    // Sending request for file listing
+    //int err = send_authenticated_msg(fd, key, LIST_REQ, seq_number);
+    //if(err == 0){
+    //    cout << "Fail to send list command" << endl;
+    //    return 0;
+    //}
+    command_t msg_type = read_authenticated_msg(fd, key, seq_number);
     string plaintext = "";
-    do{
+    while(msg_type != LIST_DONE){
         // Get server response with the number of message to read
         msg_type = read_message(fd, key, plaintext, seq_number);
-        switch(msg_type){
-            case LIST_RSP:{
-                files.push_back(plaintext);
-                break;
-            }
-            case LIST_DONE:{
-                files.push_back(plaintext);
-                // Printing files
-                auto iter = files.begin();
-                while(iter != files.end()){
-                    cout << "-> " << *iter << endl;
-                    iter++;
-                }
-                break;
-            }
-            default:
-                break;
+        if(msg_type != LIST_RSP && msg_type != LIST_DONE){
+            // manage error
         }
-    } while(msg_type != LIST_DONE);
-    //msg_type = read_authenticated_msg(fd, key, &seq_number);
+        files.push_back(plaintext);
+    }
+    if(msg_type != LIST_RSP && msg_type != LIST_DONE){
+        // manage error
+    }
+    if(files.size()==0)
+        cout << "Storage is empty. Upload some files with upload command!" << endl;
+    else{
+        // Printing files
+        auto iter = files.begin();
+        while(iter != files.end()){
+            cout << "-> " << *iter << endl;
+            iter++;
+        }
+    }
     return 1;
+}
+
+void delete_command(int fd, unsigned char* key, int* seq_number){
+    cout << "Enter the filename to delete: ";
+    string file;
+    command_t msg_type;
+    getline(cin, file);
+    if(!cin) { cerr << "Error during input\n"; exit(1); }
+
+    // Sanitize filename
+    int err = send_message(fd, key, DELETE_REQ, file, seq_number);
+    if (err == 0){
+        // Check errors
+    }
+
+    msg_type = read_authenticated_msg(fd, key, seq_number);
+    //cout << msg_type << endl;
+    if(msg_type != DELETE_CONFIRM && msg_type != NO_SUCH_FILE){
+        cout << "Something went wrong in server... try later" << endl;
+        return;
+    }
+    if(msg_type == NO_SUCH_FILE){
+        cout << "Cannot delete file because it doesn't exist in your storage" << endl;
+        return;
+    }
+
+    cout << "Are you sure you want to delete " << file << "? [y/n]" << endl;
+    getline(cin , file);
+    if(!cin) { cerr << "Error during input\n"; exit(1); }
+    while((file.compare("y")!=0) && (file.compare("n")!=0)){
+        cout << "Just type y or n to complete the request"<<endl;
+        getline(cin, file);
+        if(!cin) { cerr << "Error during input\n"; exit(1); }
+    }
+
+    if (file.compare("n") == 0){
+        err = send_authenticated_msg(fd, key, DELETE_ABORT, seq_number);
+        if(err == 0)
+            cout << "Fail to send delete command" << endl;
+        else cout << "Aborted. No file deleted" << endl;
+        return;
+    }
+
+    err = send_authenticated_msg(fd, key, DELETE_OK, seq_number);
+    if(err == 0){
+        cout << "Fail to send delete command" << endl;
+        return;
+    }
+
+    msg_type = read_authenticated_msg(fd, key, seq_number);
+    if(msg_type == DELETE_OK)
+        cout << "File successfully deleted" << endl;
+    else 
+        cout << "Cannot delete file on the server" << endl;
+    return;
+}
+
+void upload_command(int fd, unsigned char* key, int* seq_number){
+    //chiedo all'utente il nome del file su cui desidera fare upload 
+    cout<<"Enter the filename to upload: ";
+    string filename;
+    getline(cin, filename);
+
+    //ne controllo la validità
+    //if(!check_string(filename))
+    //    return;
+
+    uint8_t id;
+    uint64_t file_len;
+    uint32_t fragments = 0;
+
+    //check if file exist locally
+    string filepath = "./alice/storage/" + filename;
+    FILE* file = fopen(filepath.c_str(),"r");
+    if(!file){
+        cout << "File do not exists" << endl;
+        return;
+    }
+    else{
+        fseek(file,0,SEEK_END);
+        // taking file len
+        file_len = (ftell(file) > UINT32_MAX)? 0: ftell(file);
+        // is the check for 4gb correct?
+        if(!file_len && ftell(file)){
+            cout << "File too big or empty" << endl;
+            fclose(file);
+            return;
+        }
+    }
+   
+    fseek(file, 0, SEEK_SET);
+    // Checks ok, send the request to the server
+    int err = send_message(fd, key, UPLOAD_REQ, filename, seq_number);
+    if (err == 0){
+        // Check errors
+        fclose(file);
+    }
+    //filename.reserve(SIZE_FILENAME);
+    //filename.resize(SIZE_FILENAME);
+
+    // Now we need to split the file to smaller fragment of fixed lenght
+    fragments = file_len/MAX_FRAGMENT_SIZE + (file_len % MAX_FRAGMENT_SIZE != 0);
+
+    // Upload the file
+    cout << "Uploading " << '"'<<filename<<'"' << " with " << fragments << " frags" << endl;
+    if(!file) {
+        cout<<"Errore nell'apertura del file in lettura" << endl;
+        return;
+    }
+    unsigned char* data;
+    uint32_t data_len;
+    command_t msg_type = UPLOAD_FRGM; 
+    for (int i = 0; i< fragments; i++){
+        if(fragments == 1){
+            msg_type = UPLOAD_END;
+            NEW(data, new unsigned char[file_len], "Allocating data file");
+            fread(data,1,file_len,file);
+            data_len = file_len;
+        } else if (i == fragments - 1){
+            msg_type = UPLOAD_END;
+            NEW(data, new unsigned char[file_len%MAX_FRAGMENT_SIZE], "Allocating data file");
+            fread(data,1,(file_len%MAX_FRAGMENT_SIZE),file);
+            data_len = file_len%MAX_FRAGMENT_SIZE;
+        }
+        else {
+            NEW(data, new unsigned char[MAX_FRAGMENT_SIZE], "Allocating data file");
+            fread(data,1,MAX_FRAGMENT_SIZE,file);
+            data_len = MAX_FRAGMENT_SIZE;
+        }
+        
+        int err = send_data_message(fd, key, msg_type, data, data_len, seq_number);
+        if (err == 0){
+            // check errors
+        }
+        delete [] data;
+    }
+    fclose(file);
+    
+    command_t msg_type = read_authenticated_msg(fd, key, seq_number);
+    //cout << msg_type << endl;
+    if(msg_type == OP_FAIL){
+        cout << "Something went wrong in server... try later" << endl;
+        return;
+    } else if (msg_type != UPLOAD_DONE){
+        cout << "Operation failed" << endl;
+    } else cout << "File uploaded!" << endl;
+    return;
+}
+
+void rename_command(int fd, unsigned char* key, int* seq_number){
+    cout << "Enter file to rename: ";
+    string old_file;
+    getline(cin, old_file);
+    if(!cin) { cerr << "Error during input\n"; exit(1); }
+    // SANITIZE
+    cout << "Enter new file name: ";
+    string new_filename;
+    getline(cin, new_filename);
+    if(!cin) { cerr << "Error during input\n"; exit(1); }
+    // SANITIZE
+
+    // sending request to server
+    int err = send_message(fd, key, RENAME_REQ, old_file + ";" + new_filename , seq_number);
+    if (err == 0){
+        // Check errors
+    }
+
+    command_t msg_type = read_authenticated_msg(fd, key, seq_number);
+    //cout << msg_type << endl;
+    if(msg_type != RENAME_OK && msg_type != NO_SUCH_FILE){
+        cout << "Something went wrong in server... try later" << endl;
+        return;
+    }
+    if(msg_type == NO_SUCH_FILE){
+        cout << "Cannot rename file because it doesn't exist in your storage" << endl;
+    } else if (msg_type == OP_FAIL){
+        cout << "Operation failed" << endl;
+    } else cout << "File renamed!" << endl;
+
+    return;
 }
 
 void canonicalize(string s1){
@@ -559,3 +730,29 @@ bool check_strings(string s1){
     if(s1[0] == '-' || s1[0] == '.' || s1[0] == '_') return false;
     return true;
 }
+
+void show_help_msg(){
+
+
+    cout << "\n" << "╋╋╋┏┓╋╋╋╋╋╋╋╋┏┓╋╋╋┏┓ \n"
+    "╋╋╋┃┃╋╋╋╋╋╋╋╋┃┃╋╋┏┛┗┓ \n"
+    "┏━━┫┃┏━━┳┓┏┳━┛┃┏━┻┓┏╋━━┳━┳━━┳━━┳━━┓ \n"
+    "┃┏━┫┃┃┏┓┃┃┃┃┏┓┃┃━━┫┃┃┏┓┃┏┫┏┓┃┏┓┃┃━┫ \n"
+    "┃┗━┫┗┫┗┛┃┗┛┃┗┛┃┣━━┃┗┫┗┛┃┃┃┏┓┃┗┛┃┃━┫ \n"
+    "┗━━┻━┻━━┻━━┻━━┛┗━━┻━┻━━┻┛┗┛┗┻━┓┣━━┛ \n"
+    "╋╋╋╋╋╋╋╋╋╋╋╋╋╋╋╋╋╋╋╋╋╋╋╋╋╋╋╋┏━┛┃ \n"
+    "╋╋╋╋╋╋╋╋╋╋╋╋╋╋╋╋╋╋╋╋╋╋╋╋╋╋╋╋┗━━┛ \n"
+    "╋╋╋╋╋╋╋╋╋╋╋╋╋╋╋╋┏┓╋╋╋╋╋╋╋┏┓ \n"
+    "╋╋╋╋╋╋╋╋╋╋╋╋╋╋╋╋┃┃╋╋╋╋╋╋┏┛┗┓ \n"
+    "╋╋╋╋╋╋╋╋╋╋╋╋╋┏━━┫┃┏┳━━┳━╋┓┏┛ \n"
+    "┏━━┳━━┳━━┳━━┓┃┏━┫┃┣┫┃━┫┏┓┫┃╋┏━━┳━━┳━━┳━━┳━━┓ \n"
+    "┗━━┻━━┻━━┻━━┛┃┗━┫┗┫┃┃━┫┃┃┃┗┓┗━━┻━━┻━━┻━━┻━━┛ \n"
+    "╋╋╋╋╋╋╋╋╋╋╋╋╋┗━━┻━┻┻━━┻┛┗┻━┛ \n\n" << endl;
+
+    cout << "Cloud Storage Client\n"
+    "Command list\n"
+    "\t- list shows available files in your storage\n"
+    "\t- rename request the file to be renamed and the new name\n"
+    "\t- delete request the file to be deleted\n"
+    "\t- logout gracefully exit the application\n" << endl;
+}   
