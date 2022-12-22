@@ -7,6 +7,9 @@
 #include <dirent.h>
 #include <string.h>
 #include <openssl/evp.h>
+#include <chrono>
+#include <cmath>
+#include <iomanip>
 
 #define TAG_SIZE 16
 #define CPHR_FRAGMENT 256
@@ -15,6 +18,10 @@
 #define MSG_FRAGMENT 512
 #define IV_SIZE 12
 #define USRNM_LEN 32
+#define MAX_FRAGMENT_SIZE (1024*1024)
+#define DOWNLOAD_PROGRESS 100
+// based on max fragment size -> 2^32/2^20 + 100
+#define UPDATE_KEY_LIMIT 4196 
 
 using namespace std;
 
@@ -33,48 +40,63 @@ using namespace std;
  */
 typedef enum {
     /* ------------------------------------------ */
-    /*      operazioni che il server deve gestire */
+    /*      Cloud Storage operations              */
     /* ------------------------------------------ */
-    UPLOAD          = 12,
-    UPLOAD_REQ      = 0,   /// richiesta di registrazione di un ninckname
-    UPLOAD_FRGM     = 10,
-    UPLOAD_END      = 11,
-    UPLOAD_DONE     = 13,
-    DOWNLOAD        = 1,   /// richiesta di connessione di un client
-    DELETE          = 2,   /// richiesta di invio di un messaggio testuale ad un nickname o groupname
-    DELETE_REQ      = 101,
-    DELETE_CONFIRM  = 102,
-    DELETE_OK       = 103,
-    DELETE_ABORT    = 104,
-    LIST            = 3,   /// richiesta di invio di un messaggio testuale a tutti gli utenti 
-    LIST_REQ        = 6,
-    LIST_RSP        = 7,
-    LIST_DONE       = 8, 
-    RENAME          = 201,
-    RENAME_REQ      = 202,
-    RENAME_OK       = 203,   /// richiesta di invio di un file ad un nickname o groupname
-    LOGOUT          = 5,   /// richiesta di recupero di un file
-    HELP            = 105,
+    UPLOAD          = 10,
+    UPLOAD_REQ      = 11,   /// richiesta di registrazione di un ninckname
+    UPLOAD_FRGM     = 12,
+    UPLOAD_END      = 13,
+    UPLOAD_DONE     = 14,
+
+    DOWNLOAD        = 20,   /// richiesta di connessione di un client
+    DOWNLOAD_REQ    = 21,
+    DOWNLOAD_OK     = 22,
+    DOWNLOAD_FRGM   = 23,
+    DOWNLOAD_END    = 24,
+    DOWNLOAD_DONE   = 25,
+
+    DELETE          = 30,   /// richiesta di invio di un messaggio testuale ad un nickname o groupname
+    DELETE_REQ      = 31,
+    DELETE_CONFIRM  = 32,
+    DELETE_OK       = 33,
+    DELETE_ABORT    = 34,
+
+    LIST            = 40,   /// richiesta di invio di un messaggio testuale a tutti gli utenti 
+    LIST_REQ        = 41,
+    LIST_RSP        = 42,
+    LIST_DONE       = 43,
+
+    RENAME          = 50,
+    RENAME_REQ      = 51,
+    RENAME_OK       = 52,   /// richiesta di invio di un file ad un nickname o groupname
+
+    LOGOUT          = 60,   /// richiesta di recupero di un file
+
+    HELP            = 70,
     /* ------------------------------------------ */
-    /*    messaggi inviati dal server             */
+    /*    handshake messages                      */
     /* ------------------------------------------ */
-    HANDSHAKE_REQ   = 20,  // operazione eseguita con successo    
-    HANDSHAKE_PH1   = 21,  // notifica di messaggio testuale
-    HANDSHAKE_PH2   = 22,  // notifica di messaggio "file disponibile"
-    HANDSHAKE_PH3   = 23,
-    HANDSHAKE_ERR   = 24,
+    HANDSHAKE_REQ   = 100,  // operazione eseguita con successo    
+    HANDSHAKE_PH1   = 101,  // notifica di messaggio testuale
+    HANDSHAKE_PH2   = 102,  // notifica di messaggio "file disponibile"
+    HANDSHAKE_PH3   = 103,
+    HANDSHAKE_ERR   = 104,
+
+    UPDATE_KEY_REQ  = 200,
+    UPDATE_KEY_ACK  = 201,
     /* ------------------------------------------ */
     /*    error codes                             */
     /* ------------------------------------------ */
-    ERROR_MSGS      = 40,
-    SRV_ERROR       = 401,
-    RENEW_KEY       = 402,
-    OP_FAIL         = 41,  // generico messaggio di fallimento
-    CLIENT_EOF      = 42,  // client reach EOF or crashed
-    OP_NICK_ALREADY = 26,  // nickname o groupname gia' registrato
-    OP_NICK_UNKNOWN = 27,  // nickname non riconosciuto
-    OP_MSG_TOOLONG  = 28,  // messaggio con size troppo lunga
-    NO_SUCH_FILE = 29,  // il file richiesto non esiste
+    ERROR_MSGS      = 300,
+    SRV_ERROR       = 301,
+    RENEW_KEY       = 302,
+    OP_FAIL         = 303,  // generico messaggio di fallimento
+    CLIENT_EOF      = 304,  // client reach EOF or crashed
+    OP_NICK_ALREADY = 305,  // nickname o groupname gia' registrato
+    OP_NICK_UNKNOWN = 306,  // nickname non riconosciuto
+    OP_MSG_TOOLONG  = 307,  // messaggio con size troppo lunga
+    NO_SUCH_FILE    = 308,  // il file richiesto non esiste
+    NOT_VALID_FILE  = 309,
 } command_t;
 
 /**
@@ -88,7 +110,7 @@ int read_data(int fd, unsigned char** message, int* len);
 command_t read_message(int fd, unsigned char* key, string &plaintext, int *seq_number);
 int send_message(int fd, unsigned char* key, command_t msg_type, string message, int* seq_number);
 int send_data_message(int fd, unsigned char* key, command_t msg_type, unsigned char* plaintext, int pt_len, int* seq_number);
-command_t read_data_message(int fd, unsigned char* key, unsigned char* plaintext, int* pt_len, int *seq_number);
+command_t read_data_message(int fd, unsigned char* key, unsigned char** plaintext, int* pt_len, int *seq_number);
 
 command_t my_read_message(int fd, unsigned char* key, unsigned char** message, int* seq_number, int* nmessages);
 int my_send_message(int fd, unsigned char* key, command_t msg_type, string message, int* seq_number, int nmessages);
@@ -100,6 +122,6 @@ int serialize_pubkey(int fd, EVP_PKEY* pubkey, unsigned char** pubkey_buf);
 X509* deserialize_certificate(unsigned char* srv_cert_buf, int srv_cert_len);
 EVP_PKEY* deserialize_pubkey(unsigned char* srv_pubkey_buf, int srv_pubkey_len);
 
-
+void error_msg_type(string msg, command_t msg_type);
 
 #endif /* _UTILS_H_ */

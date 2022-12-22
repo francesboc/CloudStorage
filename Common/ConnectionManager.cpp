@@ -135,7 +135,7 @@ int my_send_message(int fd, unsigned char* key, command_t msg_type,
     delete [] aads;
     delete [] message_to_send;
     if(err <= 0) return 0;
-    *seq_number++;
+    *seq_number = *seq_number + 1;
     return cphr_len;
 
 }
@@ -207,7 +207,7 @@ command_t my_read_message(int fd, unsigned char* key, unsigned char** message,
         delete [] *message;
         return OP_FAIL;
     }
-    *seq_number++;
+    *seq_number = *seq_number + 1;
     return msg_type;
 }
 
@@ -248,7 +248,7 @@ int send_authenticated_msg(int fd, unsigned char* key, command_t msg_type, int* 
     delete [] iv;
     delete [] aads;
     if(err <= 0) return 0;
-    *seq_number++;
+    *seq_number = *seq_number + 1;
     return 1;
 }
 
@@ -298,7 +298,7 @@ command_t read_authenticated_msg(int fd, unsigned char* key, int* seq_number){
         cout << "Verify message fail (occhio alla lunghezza 0)" << endl;
         return OP_FAIL;
     }
-    *seq_number++;
+    *seq_number = *seq_number + 1;
     return msg_type;
 }
 
@@ -348,7 +348,7 @@ int send_message(int fd, unsigned char* key, command_t msg_type, string message,
     delete [] iv;
     delete [] aads;
     if(err == 0) return 0;
-    *seq_number++;
+    *seq_number = *seq_number + 1;
     return 1;
 }
 
@@ -412,7 +412,7 @@ command_t read_message(int fd, unsigned char* key, string &plaintext, int *seq_n
     plaintext = (string) chr_message;
     delete [] message;
     delete [] chr_message;
-    *seq_number++;
+    *seq_number = *seq_number + 1;
     return msg_type;
 }
 
@@ -459,12 +459,12 @@ int send_data_message(int fd, unsigned char* key, command_t msg_type, unsigned c
     delete [] request;
     delete [] iv;
     delete [] aads;
-    if(err == 0) return 0;
-    *seq_number++;
-    return 1;
+    
+    *seq_number = *seq_number + 1;
+    return err;
 }
 
-command_t read_data_message(int fd, unsigned char* key, unsigned char* plaintext, int* pt_len, int *seq_number){
+command_t read_data_message(int fd, unsigned char* key, unsigned char** plaintext, int* pt_len, int *seq_number){
     int err, request_len;
     unsigned char* request;
 
@@ -504,8 +504,8 @@ command_t read_data_message(int fd, unsigned char* key, unsigned char* plaintext
 
     delete [] request;
     
-    NEW(plaintext, new unsigned char[cphr_len], "new message");
-    *pt_len = gcm_decrypt(cphr_buf, cphr_len, aads, AAD_FRAGMNENT, tag_buf, key, iv, IV_SIZE, plaintext);
+    NEW(*plaintext, new unsigned char[cphr_len], "new message");
+    *pt_len = gcm_decrypt(cphr_buf, cphr_len, aads, AAD_FRAGMNENT, tag_buf, key, iv, IV_SIZE, *plaintext);
     
     delete [] cphr_buf;
     delete [] tag_buf;
@@ -514,11 +514,11 @@ command_t read_data_message(int fd, unsigned char* key, unsigned char* plaintext
     if (*pt_len < 0){
         // error in decrpytion
         cout << "Decrypt message fail (occhio alla lunghezza 0)" << endl;
-        delete [] plaintext;
+        delete [] *plaintext;
         return OP_FAIL;
     }
     
-    *seq_number++;
+    *seq_number = *seq_number + 1;
     return msg_type;
 }
 
@@ -597,4 +597,24 @@ EVP_PKEY* deserialize_pubkey(unsigned char* srv_pubkey_buf, int srv_pubkey_len){
     
     BIO_free(bio);
     return pubkey;
+}
+
+void error_msg_type(string msg, command_t msg_type){
+    switch(msg_type){
+        case OP_FAIL:{
+            cout << msg << ": operation failed." << endl;
+            break;
+        }
+        case NO_SUCH_FILE:{
+            cout << msg << ": no such file." << endl;
+            break;
+        }
+        case NOT_VALID_FILE:{
+            cout << msg << ": file too big or empty." << endl;
+            break;
+        }
+        default:{
+            cout << msg << endl;
+        }
+    }
 }

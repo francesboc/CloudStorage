@@ -22,8 +22,8 @@
 #define SRV_PRIVKEY_PATH "CloudStorage_key.pem"
 
 void configure_server();
-bool new_online_user(string username);
-bool disconnect_user(string username);
+bool new_online_user(string username, int* status);
+bool disconnect_user(string username, int* status);
 
 // Update set of fds
 int update_set(fd_set set, int fd_num);
@@ -34,9 +34,12 @@ vector<string> extract_params(string message);
 void list(int fd, string username, unsigned char *key, int* seq_number);
 void delete_file(int fd, string username, unsigned char *key, int* seq_number, string data);
 void upload_file(int fd, string username, unsigned char *key, int* seq_number, string data);
+void download_file(int fd, string username, unsigned char *key, int* seq_number, string filename);
 void rename_file(int fd, string username, unsigned char *key, int* seq_number, string data);
 
-unsigned char* handshake(int fd, string &username);
+
+unsigned char* handshake(int fd, string &username, int* status);
+unsigned char* update_key(int fd, unsigned char* key, int* seq_number);
 
 std::mutex mtx_online_users;
 vector<string> online_users;
@@ -236,7 +239,7 @@ void configure_server(){
     }
 }
 
-bool new_online_user(string username){
+bool new_online_user(string username, int* status){
     try{
         registered_users.at(username);
     }
@@ -254,6 +257,7 @@ bool new_online_user(string username){
     if(!found){
         // new online user
         online_users.push_back(username);
+        *status = 1;
         mtx_online_users.unlock();
         return true;
     }
@@ -262,12 +266,13 @@ bool new_online_user(string username){
     return false;
 }
 
-bool disconnect_user(string username){
+bool disconnect_user(string username, int* status){
     mtx_online_users.lock();
     auto iter = online_users.begin();
     while(iter != online_users.end()){
         if (username.compare(*iter) == 0){
             online_users.erase(iter);
+            *status=0;
             mtx_online_users.unlock();
             return true;
         }
@@ -288,23 +293,15 @@ int update_set(fd_set set, int fd_num)
 void *manage_client(void *arg)
 {
     int fd = *((int *)arg);
-    int logged_in = 1;
+    int logged_in;
     int message_type, err;
     string username = "";
 
-    // Possible commands
-    map<string, int> commands;
-    commands.insert(pair<string, int>("list", LIST));
-    commands.insert(pair<string, int>("upload", UPLOAD));
-    commands.insert(pair<string, int>("download", DOWNLOAD));
-    commands.insert(pair<string, int>("rename", RENAME));
-    commands.insert(pair<string, int>("delete", DELETE));
-    commands.insert(pair<string, int>("logout", LOGOUT));
+    unsigned char* key = handshake(fd, username, &logged_in);
 
-    unsigned char* key = handshake(fd, username);
     if(!key){
         if (!username.empty())
-            disconnect_user(username); 
+            disconnect_user(username, &logged_in); 
         close(fd);
         pthread_exit(0); 
     }
@@ -317,6 +314,14 @@ void *manage_client(void *arg)
     vector<string> message;
     
     while (logged_in && stop==0){
+        // Check if a key update is needed (to avoid seq number wrap around)
+        if(seq_number >= (UINT32_MAX - UPDATE_KEY_LIMIT)){
+            // Update session key
+            cout << "Key needs to be changed" << endl;
+            key = update_key(fd, key, &seq_number);
+            cout << endl;
+            cout << seq_number << endl;
+        }
         // <command param1 .... paramN>
         /*msg_type = my_read_message(fd, key, &message_tmp, &seq_number);
         if (msg_type == OP_FAIL){
@@ -328,7 +333,7 @@ void *manage_client(void *arg)
         msg_type = read_message(fd, key, data, &seq_number);
         if (msg_type == OP_FAIL){
             cout << "Failed to read message... terminating thread" << endl;
-            disconnect_user(username);
+            disconnect_user(username, &logged_in);
             break;
         }
         switch (msg_type){
@@ -359,9 +364,13 @@ void *manage_client(void *arg)
                 upload_file(fd, username, key, &seq_number, data);
                 break;
             }
+            case DOWNLOAD_REQ:{
+                cout << "Request to download file " << data << endl;
+                download_file(fd, username, key, &seq_number, data);
+                break;
+            }
             case LOGOUT:{
-                logged_in = 0;
-                if(disconnect_user((string)username))
+                if(disconnect_user((string)username, &logged_in))
                     cout << "User " << username << " disconnected!" << endl;
                 else cout << "Failed to disconnect user " << username << ", terminating" << endl;  
                 break;
@@ -377,7 +386,7 @@ void *manage_client(void *arg)
     pthread_exit(0);
 }
 
-unsigned char* handshake(int fd, string &username){
+unsigned char* handshake(int fd, string &username, int* status){
 
     int err, size;
     unsigned char* clt_nonce = NULL;
@@ -432,7 +441,7 @@ unsigned char* handshake(int fd, string &username){
                 cout << "Usernamne: " << username << "!" << endl; 
 
                 delete [] handshake_msg;
-                if (!new_online_user(username)){
+                if (!new_online_user(username, status)){
                     cout << "Errore nello username" << endl;
                     // user not registered or already online
                     msg_type = HANDSHAKE_ERR;
@@ -734,6 +743,86 @@ unsigned char* handshake(int fd, string &username){
     return shared_key;
 }
 
+unsigned char* update_key(int fd, unsigned char* key, int* seq_number){
+    cout << *seq_number << endl;
+    // Reading update key request
+    command_t msg_type = read_authenticated_msg(fd, key, seq_number);
+    if(msg_type != UPDATE_KEY_REQ){
+        send_authenticated_msg(fd, key, OP_FAIL, seq_number);
+        return NULL;
+    }
+
+    int err = send_authenticated_msg(fd, key, UPDATE_KEY_ACK, seq_number);
+    if(err == 0){
+        return NULL;
+    }
+
+    // Now we can start the new exchange
+    int msg_len = 0;
+    unsigned char* update_key_msg = NULL;
+    unsigned char* pubkey_buf = NULL;
+    unsigned char* clt_pubkey_buf = NULL;
+    int clt_pubkey_len;
+    EVP_PKEY* clt_dh_pubkey = NULL;
+    EVP_PKEY* my_dhkey = NULL;
+    
+    // Generate ephimeral DH
+    my_dhkey = generate_pubkey();
+    if(!my_dhkey){
+        cout << "ERRORE mydh key" << endl;
+    }
+    int pubkey_buf_len = serialize_pubkey(fd, my_dhkey, &pubkey_buf);
+    if (pubkey_buf_len == 0){
+        cout << "ERRORE pubkey buf len" << endl;
+    }
+
+    msg_type = read_data_message(fd, key, &clt_pubkey_buf, &clt_pubkey_len, seq_number);
+    if(msg_type == OP_FAIL){
+    }
+    clt_dh_pubkey = deserialize_pubkey(clt_pubkey_buf, clt_pubkey_len);
+    if(!clt_dh_pubkey){
+        cout << "Errore dh srv" << endl;
+    }
+
+    err = send_data_message(fd, key, UPDATE_KEY_REQ, pubkey_buf, pubkey_buf_len, seq_number);
+    if (err == 0){
+        //check errors
+    }
+
+    delete [] clt_pubkey_buf;
+    delete [] pubkey_buf;
+
+    // Derive new shared secret
+    unsigned char* skey;
+    int skeylen = derive_shared_secret(my_dhkey, clt_dh_pubkey, &skey);
+    if (skeylen == 0){
+        cout << "ERRORE skeylen" << endl;
+    }
+
+    printf("Here it is the shared secret pre-hash: \n");
+    BIO_dump_fp (stdout, (const char *)skey, skeylen);
+    // Using SHA-256 to extract a safe key!
+    unsigned char* digest; 
+    NEW(digest, new unsigned char[EVP_MD_size(EVP_sha256())], "digest for secret key");
+    int digestlen = hash_secret(digest, skey, skeylen);
+    if (digestlen == 0){
+        cout << "ERRORE digestlen1" << endl;
+        free_crypto(skey, skeylen);
+    }
+
+    int keylen = EVP_CIPHER_key_length(EVP_aes_128_gcm());
+
+    unsigned char* shared_key = NULL;
+    NEW(shared_key, new unsigned char[keylen], "shared secret");
+    memcpy(shared_key, digest, keylen);
+    printf("Here it is the shared secret: \n");
+    BIO_dump_fp (stdout, (const char *)shared_key, keylen);
+    free_crypto(digest, digestlen);
+    free_crypto(skey, skeylen);
+    *seq_number = 0;
+    return shared_key;
+}
+
 vector<string> extract_params(string message){
     string delim = " ";
     vector<string> request;
@@ -881,9 +970,8 @@ void upload_file(int fd, string username, unsigned char *key, int* seq_number, s
         cout << "Cannot create file" << endl;
         return;
     }
-
     while(msg_type != UPLOAD_END){
-        msg_type = read_data_message(fd, key, plaintext, &pt_len, seq_number);
+        msg_type = read_data_message(fd, key, &plaintext, &pt_len, seq_number);
         // if errore remove file -> remove(filename.c_str());
         fwrite(plaintext, 1, pt_len, file);
         delete [] plaintext;
@@ -907,7 +995,87 @@ void upload_file(int fd, string username, unsigned char *key, int* seq_number, s
     //    std::cout<<"Tentativo di inviare un file più grande di 4GB\n";
     //    return;
     //}
+    fclose(file);
     return;
+}
+
+void download_file(int fd, string username, unsigned char *key, int* seq_number, string filename){
+    //controllo la validità del nome
+    //if(!check_string(filename))
+    //    return;
+
+    uint64_t file_len;
+    uint32_t fragments = 0;
+    //check if file exist locally
+    string filepath = SERVER_STORAGE + username + "/" + filename;
+    // forse va aperto in rb?
+    FILE* file = fopen(filepath.c_str(),"r");
+    if(!file){
+        cout << "File do not exists" << endl;
+        send_authenticated_msg(fd, key, NO_SUCH_FILE, seq_number);
+        return;
+    }
+    else{
+        fseek(file,0,SEEK_END);
+        // taking file len
+        file_len = (ftell(file) > UINT32_MAX)? 0: ftell(file);
+        if(!file_len && ftell(file)){
+            cout << "File too big or empty" << endl;
+            send_authenticated_msg(fd, key, NOT_VALID_FILE, seq_number);
+            fclose(file);
+            return;
+        }
+    }
+   
+    fseek(file, 0, SEEK_SET);
+    // Checks ok, send the file to client.
+    // We need to split the file to smaller fragment of fixed lenght
+    fragments = file_len/MAX_FRAGMENT_SIZE + (file_len % MAX_FRAGMENT_SIZE != 0);
+    int err = send_authenticated_msg(fd, key, DOWNLOAD_OK, seq_number);
+    if(err == 0){
+        cout << "Fail to send upload done command" << endl;
+        return;
+    }
+    const auto progress_level = static_cast<int>(fragments*0.01);
+    // Send the file
+    cout << "Sending " << '"'<< filename <<'"' << " with " << fragments << " frags" << endl;
+    uint32_t data_len;
+    unsigned char* data;
+    command_t msg_type = DOWNLOAD_FRGM; 
+    int progress;
+    for (int i = 0; i< fragments; i++){
+        progress = static_cast<int>(i/progress_level);
+        if(fragments == 1){
+            msg_type = DOWNLOAD_END;
+            NEW(data, new unsigned char[file_len], "Allocating data file");
+            fread(data,1,file_len,file);
+            data_len = file_len;
+        } else if (i == fragments - 1){
+            msg_type = DOWNLOAD_END;
+            NEW(data, new unsigned char[file_len%MAX_FRAGMENT_SIZE], "Allocating data file");
+            fread(data,1,(file_len%MAX_FRAGMENT_SIZE),file);
+            data_len = file_len%MAX_FRAGMENT_SIZE;
+        } else {
+            NEW(data, new unsigned char[MAX_FRAGMENT_SIZE], "Allocating data file");
+            fread(data,1,MAX_FRAGMENT_SIZE,file);
+            data_len = MAX_FRAGMENT_SIZE;
+            if(progress <= 100)
+                cout << "\r [" << std::setw(4) << progress << "%] " << "Sending..." << std::flush;
+        }
+        
+        int err = send_data_message(fd, key, msg_type, data, data_len, seq_number);
+        if (err == 0){
+            cout << "Failed to send data during download" << endl;
+
+        }
+
+        delete [] data;
+        //cout << i << endl;
+    }
+    cout << endl;
+    fclose(file);
+    
+    cout << "File correctly sent!" << endl;
 }
 
 void rename_file(int fd, string username, unsigned char *key, int* seq_number, string data){

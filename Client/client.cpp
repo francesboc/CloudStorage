@@ -13,25 +13,39 @@
 #include <map>
 
 #define PORT 4333
-#define USER_PATH "./"
-#define STORAGE_PATH "/storage/"
-#define CA_CERT_PATH "/FoundationsOfCybersecurity_cert.pem"
-#define CA_CRL_PATH "/FoundationsOfCybersecurity_crl.pem"
-#define MAX_FRAGMENT_SIZE 1024
 
 int list_command(int fd, unsigned char* key, int* seq_number);
 void delete_command(int fd, unsigned char* key, int* seq_number);
+void upload_command(int fd, unsigned char* key, int* seq_number);
+void download_command(int fd, unsigned char* key, int* seq_number);
 void rename_command(int fd, unsigned char* key, int* seq_number);
-int logout(int fd, unsigned char* key, int* seq_number);
+//int logout(int fd, unsigned char* key, int* seq_number);
 void canonicalize(string s1);
 bool check_strings(string s1);
+bool strictly_check_strings(string s1);
 
 void show_help_msg();
 
 unsigned char* handshake(int fd, string username);
+unsigned char* update_key(int fd, unsigned char* key, int* seq_number);
+
+string USERNAME;
+string STORAGE_PATH;
+string USER_PATH;
+string CA_CERT_PATH;
+string CA_CRL_PATH;
 
 int main(){
     show_help_msg();
+
+    cout << "Enter your username: ";
+    getline(cin, USERNAME);
+    if(!cin) { cerr << "Error during input\n"; exit(1); }
+    if(!check_strings(USERNAME)){
+        cout << "Username not valid. Please retry." << endl;
+        return 0;
+    }
+
     int client_skt;
     struct sockaddr_in address;
 
@@ -70,12 +84,14 @@ int main(){
     commands.insert(pair<string,int>("logout",LOGOUT));
     commands.insert(pair<string,int>("help",HELP));
 
-    string command, username;
-    cout << "Enter your username: ";
-    getline(cin, username);
-    if(!cin) { cerr << "Error during input\n"; exit(1); }
-    // SANITAZE USERNAME
-    unsigned char* key = handshake(client_skt, username);
+    string command;
+    
+    USER_PATH = "./" + USERNAME;
+    STORAGE_PATH = "./" + USERNAME + "/storage/";
+    CA_CERT_PATH = USER_PATH + "/FoundationsOfCybersecurity_cert.pem";
+    CA_CRL_PATH = USER_PATH + "/FoundationsOfCybersecurity_crl.pem";
+
+    unsigned char* key = handshake(client_skt, USERNAME);
     if (!key) {
         close(client_skt);
         return 0;
@@ -87,15 +103,40 @@ int main(){
 
     int logged_in = 1;
     while(logged_in){
+        // Check if a key update is needed (to avoid seq number wrap around)
+        if(seq_number >= (UINT32_MAX - UPDATE_KEY_LIMIT)){
+            // Update session key
+            cout << "Key needs to be changed" << endl;
+            key = update_key(client_skt, key, &seq_number);
+            printf("Here it is the shared secret: \n");
+            BIO_dump_fp (stdout, (const char *)key, keylen);
+        }
         cout << "Enter command: ";
         getline(cin, command);
         if(!cin) { cerr << "Error during input\n"; exit(1); }
-        // SANITIZE COMMAND
+        for(int i=0; i<command.length(); i++)
+            command[i] = tolower(command[i]);
+        if(!strictly_check_strings(command)){
+            cout << "Command not valid. Type help for a list of allowed commands." << endl;
+            continue;
+        }
         // substite \n with \0
         switch(commands[command]) {
             case LIST:{
                 cout << "List command inserted" << endl;
                 int err = list_command(client_skt, key, &seq_number);
+                // check errors
+                break;
+            }
+            case UPLOAD:{
+                cout << "Upload command inserted" << endl;
+                upload_command(client_skt, key, &seq_number);
+                // check errors
+                break;
+            }
+            case DOWNLOAD:{
+                cout << "Download command inserted" << endl;
+                download_command(client_skt, key, &seq_number);
                 // check errors
                 break;
             }
@@ -124,7 +165,7 @@ int main(){
                 break;
             }
             default:
-                cout << "Command not recognized" << endl;
+                cout << "Command not recognized. Type help for a list of allowed commands." << endl;
                 break;
                 // code block
         }
@@ -239,10 +280,9 @@ unsigned char* handshake(int fd, string username){
                 BIO_dump_fp (stdout, (const char *)signature, signature_len);
 
                 // Load the CA's certificate
-                string cacert_file_name = USER_PATH + username + CA_CERT_PATH;
-                FILE* cacert_file = fopen(cacert_file_name.c_str(), "r");
+                FILE* cacert_file = fopen(CA_CERT_PATH.c_str(), "r");
                 if(!cacert_file){ 
-                    cerr << "Error: cannot open file '" << cacert_file_name << "' (missing?)\n";
+                    cerr << "Error: cannot open file '" << CA_CERT_PATH << "' (missing?)\n";
                     delete [] signature;
                     error_occurred = true; break;
                 }
@@ -255,10 +295,9 @@ unsigned char* handshake(int fd, string username){
                 }
                 
                 // load the CRL:
-                string crl_file_name = USER_PATH + username + CA_CRL_PATH;
-                FILE* crl_file = fopen(crl_file_name.c_str(), "r");
+                FILE* crl_file = fopen(CA_CRL_PATH.c_str(), "r");
                 if(!crl_file){ 
-                    cerr << "Error: cannot open file '" << crl_file_name << "' (missing?)\n";
+                    cerr << "Error: cannot open file '" << CA_CRL_PATH << "' (missing?)\n";
                     delete [] signature;
                     X509_free(cacert);
                     error_occurred = true; break; 
@@ -349,7 +388,7 @@ unsigned char* handshake(int fd, string username){
                 //BIO_dump_fp (stdout, (const char *)pubkey_buf, pubkey_buf_len);
 
                 // First read client privkey
-                string path = USER_PATH + username +"/" + username + "_prvkey.pem";
+                string path = USER_PATH + "/" + username + "_prvkey.pem";
                 FILE* prvkey_file = fopen(path.c_str(), "r");
                 if(!prvkey_file){ 
                     cout << "Errore prvkey file" << endl;
@@ -482,6 +521,84 @@ unsigned char* handshake(int fd, string username){
     return shared_key;
 }
 
+
+unsigned char* update_key(int fd, unsigned char* key, int* seq_number){
+    command_t msg_type;
+    // Sending request to update key
+    int err = send_authenticated_msg(fd, key, UPDATE_KEY_REQ, seq_number);
+    if(err == 0){
+        cout << "Fail to send list command" << endl;
+        return NULL;
+    }
+    msg_type = read_authenticated_msg(fd,key, seq_number);
+    if(msg_type != UPDATE_KEY_ACK)
+        return NULL;
+
+    // Now we can start the new exchange
+    int msg_len = 0;
+    unsigned char* update_key_msg = NULL;
+    unsigned char* pubkey_buf = NULL;
+    unsigned char* srv_pubkey_buf = NULL;
+    int srv_pubkey_len;
+    EVP_PKEY* srv_dh_pubkey = NULL;
+    EVP_PKEY* my_dhkey = NULL;
+    
+    // Generate ephimeral DH
+    my_dhkey = generate_pubkey();
+    if(!my_dhkey){
+        cout << "ERRORE mydh key" << endl;
+    }
+    int pubkey_buf_len = serialize_pubkey(fd, my_dhkey, &pubkey_buf);
+    if (pubkey_buf_len == 0){
+        cout << "ERRORE pubkey buf len" << endl;
+
+    }
+
+    err = send_data_message(fd, key, UPDATE_KEY_REQ, pubkey_buf, pubkey_buf_len, seq_number);
+    if (err == 0){
+        //check errors
+    }
+
+    msg_type = read_data_message(fd, key, &srv_pubkey_buf, &srv_pubkey_len, seq_number);
+    if(msg_type == OP_FAIL){
+
+    }
+    srv_dh_pubkey = deserialize_pubkey(srv_pubkey_buf, srv_pubkey_len);
+    if(!srv_dh_pubkey){
+        cout << "Errore dh srv" << endl;
+    }
+    delete [] srv_pubkey_buf;
+    delete [] pubkey_buf;
+
+    // Derive new shared secret
+    unsigned char* skey;
+    int skeylen = derive_shared_secret(my_dhkey, srv_dh_pubkey, &skey);
+    if (skeylen == 0){
+        cout << "ERRORE skeylen" << endl;
+    }
+
+    printf("Here it is the shared secret pre-hash: \n");
+    BIO_dump_fp (stdout, (const char *)skey, skeylen);
+    // Using SHA-256 to extract a safe key!
+    unsigned char* digest; 
+    NEW(digest, new unsigned char[EVP_MD_size(EVP_sha256())], "digest for secret key");
+    int digestlen = hash_secret(digest, skey, skeylen);
+    if (digestlen == 0){
+        cout << "ERRORE digestlen1" << endl;
+        free_crypto(skey, skeylen);
+    }
+
+    int keylen = EVP_CIPHER_key_length(EVP_aes_128_gcm());
+
+    unsigned char* shared_key = NULL;
+    NEW(shared_key, new unsigned char[keylen], "shared secret");
+    memcpy(shared_key, digest, keylen);
+    free_crypto(digest, digestlen);
+    free_crypto(skey, skeylen);
+    *seq_number = 0;
+    return shared_key;
+}
+
 int list_command(int fd, unsigned char* key, int* seq_number){
     int nmessages;
     vector<string> files;
@@ -499,6 +616,10 @@ int list_command(int fd, unsigned char* key, int* seq_number){
     //    return 0;
     //}
     command_t msg_type = read_authenticated_msg(fd, key, seq_number);
+    if(msg_type != LIST_DONE && msg_type != LIST_RSP){
+        cout << "Fail to list files: " << msg_type << endl;
+        return 0;
+    }
     string plaintext = "";
     while(msg_type != LIST_DONE){
         // Get server response with the number of message to read
@@ -580,21 +701,21 @@ void delete_command(int fd, unsigned char* key, int* seq_number){
 }
 
 void upload_command(int fd, unsigned char* key, int* seq_number){
-    //chiedo all'utente il nome del file su cui desidera fare upload 
+    // Asking for the file to updload
     cout<<"Enter the filename to upload: ";
     string filename;
     getline(cin, filename);
-
+    
     //ne controllo la validità
     //if(!check_string(filename))
     //    return;
 
-    uint8_t id;
+    //uint8_t id;
     uint64_t file_len;
     uint32_t fragments = 0;
 
     //check if file exist locally
-    string filepath = "./alice/storage/" + filename;
+    string filepath = STORAGE_PATH + filename;
     FILE* file = fopen(filepath.c_str(),"r");
     if(!file){
         cout << "File do not exists" << endl;
@@ -619,22 +740,28 @@ void upload_command(int fd, unsigned char* key, int* seq_number){
         // Check errors
         fclose(file);
     }
-    //filename.reserve(SIZE_FILENAME);
-    //filename.resize(SIZE_FILENAME);
 
     // Now we need to split the file to smaller fragment of fixed lenght
     fragments = file_len/MAX_FRAGMENT_SIZE + (file_len % MAX_FRAGMENT_SIZE != 0);
+    
+    const auto progress_level = static_cast<int>(fragments*0.01);
+    //const auto progress_level = 100.0 / (bar_length);
+
+    /*double percentage = 0;
+    for (int i=0; i <= num_pack; i++) {
+        os << "\r [" << std::setw(3) << static_cast<int>(i/progress_level1) << "%] " << "Uploading.." << std::flush;
+        std::this_thread::sleep_for(std::chrono::milliseconds(50));
+    }
+    os << "\n\n" << std::flush;*/
 
     // Upload the file
     cout << "Uploading " << '"'<<filename<<'"' << " with " << fragments << " frags" << endl;
-    if(!file) {
-        cout<<"Errore nell'apertura del file in lettura" << endl;
-        return;
-    }
     unsigned char* data;
     uint32_t data_len;
     command_t msg_type = UPLOAD_FRGM; 
+    int progress;
     for (int i = 0; i< fragments; i++){
+        progress = static_cast<int>(i/progress_level);
         if(fragments == 1){
             msg_type = UPLOAD_END;
             NEW(data, new unsigned char[file_len], "Allocating data file");
@@ -645,22 +772,25 @@ void upload_command(int fd, unsigned char* key, int* seq_number){
             NEW(data, new unsigned char[file_len%MAX_FRAGMENT_SIZE], "Allocating data file");
             fread(data,1,(file_len%MAX_FRAGMENT_SIZE),file);
             data_len = file_len%MAX_FRAGMENT_SIZE;
-        }
-        else {
+        } else {
             NEW(data, new unsigned char[MAX_FRAGMENT_SIZE], "Allocating data file");
             fread(data,1,MAX_FRAGMENT_SIZE,file);
             data_len = MAX_FRAGMENT_SIZE;
+            if(progress <= 100)
+                cout << "\r [" << std::setw(4) << progress << "%] " << "Uploading..." << std::flush;
         }
         
         int err = send_data_message(fd, key, msg_type, data, data_len, seq_number);
         if (err == 0){
             // check errors
         }
+        
         delete [] data;
     }
+    //cout << endl;
     fclose(file);
     
-    command_t msg_type = read_authenticated_msg(fd, key, seq_number);
+    msg_type = read_authenticated_msg(fd, key, seq_number);
     //cout << msg_type << endl;
     if(msg_type == OP_FAIL){
         cout << "Something went wrong in server... try later" << endl;
@@ -669,6 +799,50 @@ void upload_command(int fd, unsigned char* key, int* seq_number){
         cout << "Operation failed" << endl;
     } else cout << "File uploaded!" << endl;
     return;
+}
+
+
+void download_command(int fd, unsigned char* key, int* seq_number){
+    //chiedo all'utente il file che desidera scaricare 
+    cout<<"Enter the filename to download: ";
+    string filename, data;
+    getline(cin, filename);
+
+    //controllo la validità del filename
+    //if(!check_string(filename))
+    //    return;
+
+    //send download request
+    int err = send_message(fd, key, DOWNLOAD_REQ, filename, seq_number);
+    if (err == 0){
+        // Check errors
+    }
+
+    //wait for server response
+    unsigned char* plaintext;
+    int pt_len = 0;
+    command_t msg_type = read_authenticated_msg(fd, key, seq_number);
+    if (msg_type != DOWNLOAD_OK){
+        error_msg_type("Fail to download file", msg_type);
+    } else{
+        string filepath = STORAGE_PATH + filename;
+        FILE* file = fopen(filepath.c_str(), "w+");
+        int i = 0, dl_index=1;
+        // get downalod fragments
+        while(msg_type != DOWNLOAD_END){
+            msg_type = read_data_message(fd, key, &plaintext, &pt_len, seq_number);
+            fwrite(plaintext, 1, pt_len, file);
+            delete [] plaintext;
+            i++;
+            if(i%DOWNLOAD_PROGRESS==0){
+                cout << "\r Downloading" << std::string(dl_index,'.') << std::flush;
+                dl_index++;
+            }
+        }
+        cout << endl;
+        cout << "Download completed!" << endl;
+        fclose(file);
+    }
 }
 
 void rename_command(int fd, unsigned char* key, int* seq_number){
@@ -725,11 +899,20 @@ bool check_strings(string s1){
     if(s1.empty()) return false;
     static char ok_chars[] = "abcdefghijklmnopqrstuvwxyz"
                              "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
-                             "1234567890-_.";
-    if(s1.find_first_not_of(ok_chars) != string::npos) return false;
-    if(s1[0] == '-' || s1[0] == '.' || s1[0] == '_') return false;
+                             "1234567890_.";
+    if( s1.find_first_not_of(ok_chars) != string::npos) return false;
+    if( (s1.length()==1 && s1[0] == '.') || (s1.length()==2 && s1[0] == '.' && s1[1]=='.') || (s1.length()==1 && s1[0]=='_')) return false;
     return true;
 }
+
+bool strictly_check_strings(string s1){
+    if(s1.empty()) return false;
+    static char ok_chars[] = "abcdefghijklmnopqrstuvwxyz";
+    if(s1.find_first_not_of(ok_chars) != string::npos) return false;
+    return true;
+}
+
+
 
 void show_help_msg(){
 
