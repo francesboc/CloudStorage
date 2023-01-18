@@ -16,8 +16,9 @@
 #include "../Common/crypto.h"
 
 #define PORT 4333
-#define SERVER_HOME "./"
+//#define SERVER_HOME "./"
 #define SERVER_STORAGE "./Storage/"
+#define SERVER_HOME "/home/applied/Desktop/CloudStorage/Server/"
 #define CERTIFICATE_PATH "CloudStorage_cert.pem"
 #define SRV_PRIVKEY_PATH "CloudStorage_key.pem"
 
@@ -31,15 +32,15 @@ void *manage_client(void *arg);
 
 vector<string> extract_params(string message);
 // Operations
-void list(int fd, string username, unsigned char *key, int* seq_number);
-void delete_file(int fd, string username, unsigned char *key, int* seq_number, string data);
-void upload_file(int fd, string username, unsigned char *key, int* seq_number, string data);
-void download_file(int fd, string username, unsigned char *key, int* seq_number, string filename);
-void rename_file(int fd, string username, unsigned char *key, int* seq_number, string data);
+bool list(int fd, string username, unsigned char **key, uint32_t* seq_number);
+bool delete_file(int fd, string username, unsigned char *key, uint32_t* seq_number, string data);
+bool upload_file(int fd, string username, unsigned char *key, uint32_t* seq_number, string data);
+bool download_file(int fd, string username, unsigned char *key, uint32_t* seq_number, string filename);
+bool rename_file(int fd, string username, unsigned char *key, uint32_t* seq_number, string data);
 
 
 unsigned char* handshake(int fd, string &username, int* status);
-unsigned char* update_key(int fd, unsigned char* key, int* seq_number);
+unsigned char* update_key(int fd, unsigned char* key, uint32_t* seq_number);
 
 std::mutex mtx_online_users;
 vector<string> online_users;
@@ -204,6 +205,8 @@ void configure_server(){
             if ((pos = line.find(" ")) == string::npos){
                 // error
                 cerr << "ERROR: wrong configuration file. Please check README." << endl;
+                fp.close();
+                return;
             }
             username = line.substr(0,pos);
             path_to_pubkey = line.substr(pos+1, line.size());
@@ -217,7 +220,7 @@ void configure_server(){
     storage_dir = opendir(SERVER_STORAGE);
     if(!storage_dir){
         // we need to create the directory
-        if(mkdir(SERVER_STORAGE, 0774)==-1){
+        if(mkdir(SERVER_STORAGE, 0754)==-1){ //only read to others
             perror("Storage directory");
             exit(EXIT_FAILURE);
         }
@@ -229,7 +232,7 @@ void configure_server(){
         string user_storage = iter->first;
         storage_dir = opendir((SERVER_STORAGE + user_storage).c_str());
         if(!storage_dir){
-            if(mkdir((SERVER_STORAGE + user_storage).c_str(), 0644)==-1){
+            if(mkdir((SERVER_STORAGE + user_storage).c_str(), 0754)==-1){
                 perror("User storage directory");
                 exit(EXIT_FAILURE);
             }
@@ -296,7 +299,7 @@ void *manage_client(void *arg)
     int logged_in;
     int message_type, err;
     string username = "";
-
+    
     unsigned char* key = handshake(fd, username, &logged_in);
 
     if(!key){
@@ -306,13 +309,14 @@ void *manage_client(void *arg)
         pthread_exit(0); 
     }
     int keylen = EVP_CIPHER_key_length(EVP_aes_128_gcm());
-    int seq_number = 0;
+    uint32_t seq_number = 0;
     command_t msg_type;
     string data = "";
     unsigned char *message_tmp = NULL;
     int msg_len;
     vector<string> message;
-    
+
+
     while (logged_in && stop==0){
         // Check if a key update is needed (to avoid seq number wrap around)
         if(seq_number >= (UINT32_MAX - UPDATE_KEY_LIMIT)){
@@ -346,31 +350,37 @@ void *manage_client(void *arg)
                     delete[] message_tmp;
                     continue;
                 }*/
-                list(fd, username, key, &seq_number);
+                cout << "Request to list files" << endl;
+                if(!list(fd, username, &key, &seq_number))
+                    disconnect_user(username, &logged_in);
                 break;
             }
             case DELETE_REQ:{
                 cout << "Requesting to delete " << data << endl;
-                delete_file(fd, username, key, &seq_number, data);
+                if(!delete_file(fd, username, key, &seq_number, data))
+                    disconnect_user(username, &logged_in);
                 break;
             }
             case RENAME_REQ:{
                 cout << "Requesting to rename file " << data << endl;
-                rename_file(fd, username, key, &seq_number, data);
+                if(!rename_file(fd, username, key, &seq_number, data))
+                    disconnect_user(username, &logged_in);
                 break;
             }
             case UPLOAD_REQ:{
                 cout << "Request to upload file " << data << endl;
-                upload_file(fd, username, key, &seq_number, data);
+                if(!upload_file(fd, username, key, &seq_number, data))
+                    disconnect_user(username, &logged_in);
                 break;
             }
             case DOWNLOAD_REQ:{
                 cout << "Request to download file " << data << endl;
-                download_file(fd, username, key, &seq_number, data);
+                if(!download_file(fd, username, key, &seq_number, data))
+                    disconnect_user(username, &logged_in);
                 break;
             }
             case LOGOUT:{
-                if(disconnect_user((string)username, &logged_in))
+                if(disconnect_user(username, &logged_in))
                     cout << "User " << username << " disconnected!" << endl;
                 else cout << "Failed to disconnect user " << username << ", terminating" << endl;  
                 break;
@@ -380,7 +390,7 @@ void *manage_client(void *arg)
         }
         //delete[] message_tmp;
     }
-
+    // FREE CRYPTO MATERIAL
     free_crypto(key, keylen);
     close(fd);
     pthread_exit(0);
@@ -743,7 +753,7 @@ unsigned char* handshake(int fd, string &username, int* status){
     return shared_key;
 }
 
-unsigned char* update_key(int fd, unsigned char* key, int* seq_number){
+unsigned char* update_key(int fd, unsigned char* key, uint32_t* seq_number){
     cout << *seq_number << endl;
     // Reading update key request
     command_t msg_type = read_authenticated_msg(fd, key, seq_number);
@@ -820,9 +830,13 @@ unsigned char* update_key(int fd, unsigned char* key, int* seq_number){
     free_crypto(digest, digestlen);
     free_crypto(skey, skeylen);
     *seq_number = 0;
+
+    free_crypto(key, keylen);
+
     return shared_key;
 }
 
+/* to be deprecated */
 vector<string> extract_params(string message){
     string delim = " ";
     vector<string> request;
@@ -839,7 +853,7 @@ vector<string> extract_params(string message){
     return request;
 }
 
-void list(int fd, string username, unsigned char *key, int* seq_number){
+bool list(int fd, string username, unsigned char **key, uint32_t* seq_number){
     string path = SERVER_STORAGE + username + "/";
     vector<string> files;
     DIR *dir;
@@ -855,186 +869,229 @@ void list(int fd, string username, unsigned char *key, int* seq_number){
         closedir(dir);
     }
     else{
-        perror("opendir");
-        // Manage error message
-        /*if (dir == NULL) {
-        id = 8; //ID di errore 
-        plaintext = std::string("Cartella non trovata");
-        plaintext.resize(SIZE_FILENAME);
-        if(!send_std_packet(plaintext,key,sd,counter,id,1)){
-            #pragma optimize("", off)
-            memset(key, 0, EVP_CIPHER_key_length(EVP_aes_128_gcm()));
-            #pragma optimize("", on)
-            free(key);
-            disconnect(sd);
-        }
-        return;
-    }*/
-        return;
+        cout << "Failed to open the user directory" << endl;
+        send_authenticated_msg(fd, *key, OP_FAIL, seq_number);
+        return false;
     }
     command_t msg_type = (files.size()>0) ? LIST_RSP : LIST_DONE;
-    // Send list done
-    err = send_authenticated_msg(fd, key, msg_type, seq_number);
+    // Send list response
+    err = send_authenticated_msg(fd, *key, msg_type, seq_number);
     if(err == 0){
-        cout << "Fail to send list done command" << endl;
-        return ;
+        cout << "Fail to send list response" << endl;
+        return false;
     }
     auto iter = files.begin();
     while(nfiles > 0){
+        // Check if a key update is needed (to avoid seq number wrap around)
+        if(*seq_number >= (UINT32_MAX - UPDATE_KEY_LIMIT)){
+            // Update session key
+            cout << "Key needs to be changed" << endl;
+            *key = update_key(fd, *key, seq_number);
+            cout << endl;
+            cout << *seq_number << endl;
+        }
         if(nfiles == 1) msg_type = LIST_DONE;
-        err = send_message(fd, key, msg_type, *iter, seq_number);
+        err = send_message(fd, *key, msg_type, *iter, seq_number);
         if (err == 0){
-            // fail to send message
+            cout << "Fail to send list item" << endl;
+            return false;
         }
         iter++;
         nfiles--;
     }
-    
-    return;
+    cout << "Sent list of files" << endl;
+    return true;
 }
 
-void delete_file(int fd, string username, unsigned char *key, int* seq_number, string data){
-    // NEED to SANITIZE DATA
-    string path = SERVER_STORAGE + username;
-    // canonicalize path
-    command_t msg_type = NO_SUCH_FILE;
-    vector<string> files;
-    DIR *dir;
-    struct dirent *diread;
-    int err, nfiles = 0;
-    if ((dir = opendir(path.c_str())) != NULL){
-        while ((diread = readdir(dir)) != NULL){
-            if (strncmp(diread->d_name, ".", 1) != 0 && 
-                strncmp(diread->d_name, "..", 2) != 0 && data.compare(diread->d_name) == 0){
-                msg_type = DELETE_CONFIRM;
-                break;
-            }
+bool delete_file(int fd, string username, unsigned char *key, uint32_t* seq_number, string data){
+    // checking data
+    if(!check_string(data)){
+        cout << "Filename not valid." << endl;
+        if(send_authenticated_msg(fd, key, NOT_VALID_FILE, seq_number)==0)
+            return false;
+        return true;
+    }
+
+    string path = SERVER_STORAGE + username + "/" + data;
+    string ok_dir = SERVER_HOME + (string)"Storage/" + username;
+    // canonicalizing path
+    char* canon_file = realpath(path.c_str(), NULL);
+    if(canon_file){
+        if(strncmp(canon_file, ok_dir.c_str(), strlen(ok_dir.c_str())) != 0) { 
+            // Unauthorized path!
+            free(canon_file); 
+            // File do not exist
+            cout << "Invalid path detected" << endl;
+            if(send_authenticated_msg(fd, key, OP_FAIL, seq_number)==0)
+                return false;
+            return true;
         }
-        closedir(dir);
-    }
-    else{
-        perror("opendir");
-        return;
+        free(canon_file); 
     }
 
-    //auto iter = files.begin();
-    //while(iter != files.end()){
-    //    if(data.compare(*iter) == 0){
-    //        msg_type = DELETE_CONFIRM;
-    //        break;
-    //    }
-    //    iter++;
-    //}
-
-    // Send request to confirm
-    err = send_authenticated_msg(fd, key, msg_type, seq_number);
-    if(err == 0){
-        cout << "Fail to send delete command" << endl;
-        return;
+    FILE* file = fopen(path.c_str(), "r");
+    if(!file){
+        // File do not exist
+        cout << "File do not exists" << endl;
+        if(send_authenticated_msg(fd, key, NO_SUCH_FILE, seq_number)==0)
+            return false;
+        return true;
     }
-    if (msg_type == NO_SUCH_FILE)
-        //file not found in server storage
-        return;
+    else fclose(file);
+
+    // File exist, asking for confirmation
+    if(send_authenticated_msg(fd, key, DELETE_CONFIRM, seq_number)==0){
+        cout << "Cannot send delete confirmation" << endl;
+        return false;
+    }
 
     // Read client's reply
-    msg_type = read_authenticated_msg(fd, key, seq_number);
+    command_t msg_type = read_authenticated_msg(fd, key, seq_number);
     if(msg_type != DELETE_OK && msg_type != DELETE_ABORT){
-        // SHOULD SEND SOME ERROR?
+        send_authenticated_msg(fd, key, OP_FAIL, seq_number);
         cout << "Client's reply not recognized" << endl;
-        return;
+        return false;
     }
 
     if(msg_type == DELETE_ABORT){
-        cout << data <<": deletion cancelled" << endl;
-        return;
+        cout << "\"" << data <<"\": deletion cancelled" << endl;
+        return true;
+    }
+   
+    // here we can delete file
+    if (remove(path.c_str()) != 0){
+        // Something went wrong
+        send_authenticated_msg(fd, key, OP_FAIL, seq_number);
+        cout << "Error while deleting file" << endl;
+        return false;
+    }   
+
+    if(send_authenticated_msg(fd, key, DELETE_OK, seq_number)==0){
+        cout << "Cannot send confirmation for deleting file" << endl;
+        return false;
     }
 
-    // here we can delete file
-    string file_path = path + "/" + data; // canonicalization?
-    if (remove(file_path.c_str()) != 0){
-        send_authenticated_msg(fd, key, OP_FAIL, seq_number);
-    }   
-    else send_authenticated_msg(fd, key, DELETE_OK, seq_number);
-    return;
+    return true;
 }
 
-void upload_file(int fd, string username, unsigned char *key, int* seq_number, string data){
-    // NEED to SANITIZE DATA
+bool upload_file(int fd, string username, unsigned char *key, uint32_t* seq_number, string data){
+    // validate filename
+    if(!check_string(data)){
+        cout << "Filename not valid. Got: " << data << endl;
+        if(send_authenticated_msg(fd, key, NOT_VALID_FILE, seq_number)==0)
+            return false;
+        return true;
+    }
+
     string filepath = SERVER_STORAGE + username + "/" + data;
+    string ok_dir = SERVER_HOME + (string)"Storage/" + username;
+    // canonicalizing path
+    char* canon_file = realpath(filepath.c_str(), NULL);
+    if(canon_file){
+        if(strncmp(canon_file, ok_dir.c_str(), strlen(ok_dir.c_str())) != 0) { 
+            // Unauthorized path!
+            free(canon_file); 
+            cout << "Invalid path detected" << endl;
+            if(send_authenticated_msg(fd, key, NOT_VALID_FILE, seq_number)==0)
+                return false;
+            return true;
+        }
+        free(canon_file); 
+    }
+
     int pt_len = 0;
     unsigned char* plaintext;
-    // canonicalize path
     command_t msg_type = UPLOAD_REQ;
     FILE* file = fopen(filepath.c_str(), "w+");
     if(!file){
         cout << "Cannot create file" << endl;
-        return;
+        send_authenticated_msg(fd, key, OP_FAIL, seq_number);
+        return false;
+    }
+    if(send_authenticated_msg(fd, key, UPLOAD_ACK, seq_number)==0){
+        fclose(file);
+        return false;
     }
     while(msg_type != UPLOAD_END){
         msg_type = read_data_message(fd, key, &plaintext, &pt_len, seq_number);
+        if(msg_type == OP_FAIL){
+            fclose(file);
+            return false;
+        }
         // if errore remove file -> remove(filename.c_str());
         fwrite(plaintext, 1, pt_len, file);
         delete [] plaintext;
     }
-
+    fclose(file);
     // Upload finished
     int err = send_authenticated_msg(fd, key, UPLOAD_DONE, seq_number);
     if(err == 0){
         cout << "Fail to send upload done command" << endl;
-        return;
+        return false;
     }
-    // ###############################
 
-    //controlla che la stringa ricevuta sia valida
-    //if(!check_string(std::string((char*)plaintext))){
-    //    id = 8; //ID di errore 
-    //    msg = std::string("Filename non valido");
-    //    msg.resize(SIZE_FILENAME);
-    //}
-    //if(num_packets > UINT32_MAX/MAX_PAYLOAD_SIZE){
-    //    std::cout<<"Tentativo di inviare un file più grande di 4GB\n";
-    //    return;
-    //}
-    fclose(file);
-    return;
+    return true;
 }
 
-void download_file(int fd, string username, unsigned char *key, int* seq_number, string filename){
-    //controllo la validità del nome
-    //if(!check_string(filename))
-    //    return;
+bool download_file(int fd, string username, unsigned char *key, uint32_t* seq_number, string filename){
+    // validate filename
+    if(!check_string(filename)){
+        cout << "Filename not valid. Got: " << filename << endl;
+        if(send_authenticated_msg(fd, key, NOT_VALID_FILE, seq_number)==0)
+            return false;
+        return true;
+    }
 
     uint64_t file_len;
     uint32_t fragments = 0;
-    //check if file exist locally
+    
     string filepath = SERVER_STORAGE + username + "/" + filename;
-    // forse va aperto in rb?
+    string ok_dir = SERVER_HOME + (string)"Storage/" + username;
+    // canonicalizing path
+    char* canon_file = realpath(filepath.c_str(), NULL);
+    if(canon_file){
+        if(strncmp(canon_file, ok_dir.c_str(), strlen(ok_dir.c_str())) != 0) { 
+            // Unauthorized path!
+            free(canon_file); 
+            // File do not exist
+            cout << "Invalid path detected" << endl;
+            if(send_authenticated_msg(fd, key, NOT_VALID_FILE, seq_number)==0)
+                return false;
+            return true;
+        }
+        free(canon_file); 
+    }
+
+    // TODO forse va aperto in rb?
     FILE* file = fopen(filepath.c_str(),"r");
     if(!file){
         cout << "File do not exists" << endl;
-        send_authenticated_msg(fd, key, NO_SUCH_FILE, seq_number);
-        return;
+        if(send_authenticated_msg(fd, key, NO_SUCH_FILE, seq_number)==0)
+            return false;
+        return true;
     }
     else{
         fseek(file,0,SEEK_END);
         // taking file len
         file_len = (ftell(file) > UINT32_MAX)? 0: ftell(file);
-        if(!file_len && ftell(file)){
-            cout << "File too big or empty" << endl;
-            send_authenticated_msg(fd, key, NOT_VALID_FILE, seq_number);
+        if(!file_len){
+            cout << "Empty file or over 4GB." << endl;
             fclose(file);
-            return;
+            if(send_authenticated_msg(fd, key, NOT_VALID_FILE, seq_number)==0)
+                return false;
+            return true;
         }
     }
    
     fseek(file, 0, SEEK_SET);
-    // Checks ok, send the file to client.
-    // We need to split the file to smaller fragment of fixed lenght
+    // Checks are ok, send file to client.
+    // Need to split the file to smaller fragment of fixed lenght
     fragments = file_len/MAX_FRAGMENT_SIZE + (file_len % MAX_FRAGMENT_SIZE != 0);
-    int err = send_authenticated_msg(fd, key, DOWNLOAD_OK, seq_number);
+    int err = send_authenticated_msg(fd, key, DOWNLOAD_ACK, seq_number);
     if(err == 0){
-        cout << "Fail to send upload done command" << endl;
-        return;
+        cout << "Fail to send download ack command" << endl;
+        fclose(file);
+        return false;
     }
     const auto progress_level = static_cast<int>(fragments*0.01);
     // Send the file
@@ -1044,7 +1101,6 @@ void download_file(int fd, string username, unsigned char *key, int* seq_number,
     command_t msg_type = DOWNLOAD_FRGM; 
     int progress;
     for (int i = 0; i< fragments; i++){
-        progress = static_cast<int>(i/progress_level);
         if(fragments == 1){
             msg_type = DOWNLOAD_END;
             NEW(data, new unsigned char[file_len], "Allocating data file");
@@ -1059,82 +1115,125 @@ void download_file(int fd, string username, unsigned char *key, int* seq_number,
             NEW(data, new unsigned char[MAX_FRAGMENT_SIZE], "Allocating data file");
             fread(data,1,MAX_FRAGMENT_SIZE,file);
             data_len = MAX_FRAGMENT_SIZE;
+            (progress_level != 0) ? progress = static_cast<int>(i/progress_level) : progress = 100;
             if(progress <= 100)
                 cout << "\r [" << std::setw(4) << progress << "%] " << "Sending..." << std::flush;
         }
         
         int err = send_data_message(fd, key, msg_type, data, data_len, seq_number);
-        if (err == 0){
-            cout << "Failed to send data during download" << endl;
-
-        }
-
         delete [] data;
-        //cout << i << endl;
+        if (err == 0){
+            cout << "Download failed" << endl;
+            fclose(file);
+            return false;
+        }
     }
-    cout << endl;
     fclose(file);
-    
     cout << "File correctly sent!" << endl;
+    return true;
 }
 
-void rename_file(int fd, string username, unsigned char *key, int* seq_number, string data){
-    // NEED to SANITIZE DATA
-    string path = SERVER_STORAGE + username;
-    // canonicalize path
-    command_t msg_type = NO_SUCH_FILE;
-    DIR *dir;
-    struct dirent *diread;
-    int err, nfiles = 0;
+bool rename_file(int fd, string username, unsigned char *key, uint32_t* seq_number, string data){
+    // validate old filename
+    if(!check_string(data)){
+        cout << "Filename not valid. Got: " << data << endl;
+        if(send_authenticated_msg(fd, key, NOT_VALID_FILE, seq_number)==0)
+            return false;
+        return true;
+    }
 
-    int index = data.find(";");
-    string old_file, new_filename;
-    old_file = data.substr(0, index);
-    new_filename = data.substr(index+1);
-
-    cout << old_file << "-" << new_filename << endl;
-    // Check validity of old e new name
-    if ((dir = opendir(path.c_str())) != NULL){
-        while ((diread = readdir(dir)) != NULL){
-            if (strncmp(diread->d_name, ".", 1) != 0 && 
-                strncmp(diread->d_name, "..", 2) != 0 && old_file.compare(diread->d_name) == 0){
-                msg_type = RENAME_OK;
-                break;
-            }
+    string old_path = SERVER_STORAGE + username + "/" + data;
+    string ok_dir = SERVER_HOME + (string)"Storage/" + username;
+    // canonicalizing path
+    char* canon_file = realpath(old_path.c_str(), NULL);
+    if(canon_file){
+        if(strncmp(canon_file, ok_dir.c_str(), strlen(ok_dir.c_str())) != 0) { 
+            // Unauthorized path!
+            free(canon_file); 
+            // File do not exist
+            cout << "Invalid path detected" << endl;
+            if(send_authenticated_msg(fd, key, OP_FAIL, seq_number)==0)
+                return false;
+            return true;
         }
-        closedir(dir);
-    }
-    else{
-        perror("opendir");
-        return;
+        free(canon_file); 
     }
 
-    if (msg_type == RENAME_OK){
-        //File found, renaming it
-        string old_path = path + "/" + old_file;
-        string new_path = path + "/" + new_filename;
-        err = rename(old_path.c_str(), new_path.c_str());
-        if (err != 0){
-            msg_type = OP_FAIL;
-            cout << "Fail to rename file "<< old_file << endl;
-        }
-        else cout << "Successfully renamed file" << endl;
+    FILE* file = fopen(old_path.c_str(),"r");
+    if(!file){
+        cout << "File do not exists" << endl;
+        if(send_authenticated_msg(fd, key, NO_SUCH_FILE, seq_number)==0)
+            return false;
+        return true;
     }
-    else cout << "No such file in user storage" << endl;
+    fclose(file);
+
+    // File exists, proceeding with rename operation
+    if(send_authenticated_msg(fd, key, RENAME_ACK, seq_number)==0)
+        return false;
+
+    // Get new filename from client
+    string new_file = "";
+    command_t msg_type = read_message(fd, key, new_file, seq_number);
+    if (msg_type != RENAME_REQ){
+        cout << "Rename operation failed." << endl;
+        if(msg_type == OP_FAIL) return false;
+        else return true;
+    }
+
+    // validate new filename
+    if(!check_string(new_file)){
+        cout << "Filename not valid. Got: " << new_file << endl;
+        if(send_authenticated_msg(fd, key, NOT_VALID_FILE, seq_number)==0)
+            return false;
+        return true;
+    }
+    string new_path = SERVER_STORAGE + username + "/" + new_file;
+    // canonicalizing path
+    canon_file = realpath(new_path.c_str(), NULL);
+    if(canon_file){
+        if(strncmp(canon_file, ok_dir.c_str(), strlen(ok_dir.c_str())) != 0) { 
+            // Unauthorized path!
+            free(canon_file); 
+            // File do not exist
+            cout << "Invalid path detected" << endl;
+            if(send_authenticated_msg(fd, key, OP_FAIL, seq_number)==0)
+                return false;
+            return true;
+        }
+        free(canon_file); 
+    }
+
+    // Check if the same file exists in current storage
+    file = fopen(new_path.c_str(),"r");
+    if(file){
+        fclose(file);
+        // File already exists, cannot rename
+        cout << "File already exists." << endl;
+        if(send_authenticated_msg(fd, key, FILE_ALREADY, seq_number)==0)
+            return false;
+        return true;
+    }
+    // Proceed with renaming
+    int err = rename(old_path.c_str(), new_path.c_str());
+    if (err != 0){
+        // Rename failed
+        send_authenticated_msg(fd, key, OP_FAIL, seq_number);
+        cout << "Fail to rename file "<< data << endl;
+        return false;
+    }
 
     // Send result to client
-    err = send_authenticated_msg(fd, key, msg_type, seq_number);
+    err = send_authenticated_msg(fd, key, RENAME_OK, seq_number);
     if(err == 0){
         cout << "Fail to send result to client" << endl;
-        return;
+        return false;
     }
-
-    return;
+    cout << "Successfully renamed file" << endl;
+    return true;
 }
 
 void show_help_msg(){
-
-
     cout << "\n" << "╋╋╋┏┓╋╋╋╋╋╋╋╋┏┓╋╋╋┏┓ \n"
     "╋╋╋┃┃╋╋╋╋╋╋╋╋┃┃╋╋┏┛┗┓ \n"
     "┏━━┫┃┏━━┳┓┏┳━┛┃┏━┻┓┏╋━━┳━┳━━┳━━┳━━┓ \n"
@@ -1147,5 +1246,4 @@ void show_help_msg(){
     "┏━━┳━━┳━━┳━━┓┃━━┫┃━┫┏┫┗┛┃┃━┫┏┻━┳━━┳━━┳━━┳━━┓ \n"
     "┗━━┻━━┻━━┻━━┛┣━━┃┃━┫┃┗┓┏┫┃━┫┣━━┻━━┻━━┻━━┻━━┛ \n"
     "╋╋╋╋╋╋╋╋╋╋╋╋╋┗━━┻━━┻┛╋┗┛┗━━┻┛ \n" << endl;
-
 }

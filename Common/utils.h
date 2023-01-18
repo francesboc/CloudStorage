@@ -44,13 +44,14 @@ typedef enum {
     /* ------------------------------------------ */
     UPLOAD          = 10,
     UPLOAD_REQ      = 11,   /// richiesta di registrazione di un ninckname
-    UPLOAD_FRGM     = 12,
-    UPLOAD_END      = 13,
-    UPLOAD_DONE     = 14,
+    UPLOAD_ACK      = 12,
+    UPLOAD_FRGM     = 13,
+    UPLOAD_END      = 14,
+    UPLOAD_DONE     = 15,
 
     DOWNLOAD        = 20,   /// richiesta di connessione di un client
     DOWNLOAD_REQ    = 21,
-    DOWNLOAD_OK     = 22,
+    DOWNLOAD_ACK    = 22,
     DOWNLOAD_FRGM   = 23,
     DOWNLOAD_END    = 24,
     DOWNLOAD_DONE   = 25,
@@ -68,7 +69,9 @@ typedef enum {
 
     RENAME          = 50,
     RENAME_REQ      = 51,
-    RENAME_OK       = 52,   /// richiesta di invio di un file ad un nickname o groupname
+    RENAME_ACK      = 52,
+    RENAME_OK       = 53,   /// richiesta di invio di un file ad un nickname o groupname
+    RENAME_FAIL     = 54,
 
     LOGOUT          = 60,   /// richiesta di recupero di un file
 
@@ -97,6 +100,7 @@ typedef enum {
     OP_MSG_TOOLONG  = 307,  // messaggio con size troppo lunga
     NO_SUCH_FILE    = 308,  // il file richiesto non esiste
     NOT_VALID_FILE  = 309,
+    FILE_ALREADY    = 310,
 } command_t;
 
 /**
@@ -107,15 +111,15 @@ int readn(long fd, void *buf, size_t size);
 int writen(long fd, void *buf, size_t size);
 int send_data(int fd, unsigned char* message, int len);
 int read_data(int fd, unsigned char** message, int* len);
-command_t read_message(int fd, unsigned char* key, string &plaintext, int *seq_number);
-int send_message(int fd, unsigned char* key, command_t msg_type, string message, int* seq_number);
-int send_data_message(int fd, unsigned char* key, command_t msg_type, unsigned char* plaintext, int pt_len, int* seq_number);
-command_t read_data_message(int fd, unsigned char* key, unsigned char** plaintext, int* pt_len, int *seq_number);
+command_t read_message(int fd, unsigned char* key, string &plaintext, uint32_t *seq_number);
+int send_message(int fd, unsigned char* key, command_t msg_type, string message, uint32_t* seq_number);
+int send_data_message(int fd, unsigned char* key, command_t msg_type, unsigned char* plaintext, int pt_len, uint32_t* seq_number);
+command_t read_data_message(int fd, unsigned char* key, unsigned char** plaintext, int* pt_len, uint32_t *seq_number);
 
-command_t my_read_message(int fd, unsigned char* key, unsigned char** message, int* seq_number, int* nmessages);
-int my_send_message(int fd, unsigned char* key, command_t msg_type, string message, int* seq_number, int nmessages);
-int send_authenticated_msg(int fd, unsigned char* key, command_t msg_type, int* seq_number);
-command_t read_authenticated_msg(int fd, unsigned char* key, int* seq_number);
+command_t my_read_message(int fd, unsigned char* key, unsigned char** message, uint32_t* seq_number, int* nmessages);
+int my_send_message(int fd, unsigned char* key, command_t msg_type, string message, uint32_t* seq_number, int nmessages);
+int send_authenticated_msg(int fd, unsigned char* key, command_t msg_type, uint32_t* seq_number);
+command_t read_authenticated_msg(int fd, unsigned char* key, uint32_t* seq_number);
 
 int serialize_certificate(int fd, X509* srv_cert, unsigned char** cert_buf);
 int serialize_pubkey(int fd, EVP_PKEY* pubkey, unsigned char** pubkey_buf);
@@ -123,5 +127,9 @@ X509* deserialize_certificate(unsigned char* srv_cert_buf, int srv_cert_len);
 EVP_PKEY* deserialize_pubkey(unsigned char* srv_pubkey_buf, int srv_pubkey_len);
 
 void error_msg_type(string msg, command_t msg_type);
+bool check_string(string s1);
+bool strictly_check_string(string s1);
+bool canonicalize1(string file, string username);
+
 
 #endif /* _UTILS_H_ */

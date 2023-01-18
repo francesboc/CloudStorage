@@ -395,5 +395,5 @@ void free_crypto(unsigned char* buf, size_t size){
 #pragma optimize("", off)
     memset(buf, 0, size);
 #pragma optmize("", on)
-    delete [] buf;
+    //delete [] buf;
 }
