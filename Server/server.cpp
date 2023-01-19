@@ -30,7 +30,6 @@ bool disconnect_user(string username, int* status);
 int update_set(fd_set set, int fd_num);
 void *manage_client(void *arg);
 
-vector<string> extract_params(string message);
 // Operations
 bool list(int fd, string username, unsigned char **key, uint32_t* seq_number);
 bool delete_file(int fd, string username, unsigned char *key, uint32_t* seq_number, string data);
@@ -40,6 +39,7 @@ bool rename_file(int fd, string username, unsigned char *key, uint32_t* seq_numb
 
 
 unsigned char* handshake(int fd, string &username, int* status);
+void handshake_error(int fd, string reason_msg);
 unsigned char* update_key(int fd, unsigned char* key, uint32_t* seq_number);
 
 std::mutex mtx_online_users;
@@ -139,7 +139,7 @@ int main()
                 // Spawn new thread to manage client
                 if (pthread_create(&clientThread, NULL, &manage_client, (void *)&client_skt))
                 {
-                    cout << "Errore creazione del thread" << endl;
+                    cout << "Error while creating new thread" << endl;
                     close(client_skt);
                 }
                 pthread_detach(clientThread);
@@ -150,27 +150,6 @@ int main()
                     close(fd);
                     exit(EXIT_FAILURE);
                 }
-                /*
-                else {
-                    // I/O sock ready
-                    cout << "fd: " << fd << " is ready!" << endl;
-                    fflush(stdout);
-                    nread = read(fd, buf, 1024);
-                    if(nread==0){
-                        cout << "Closing connection of " << fd << endl;
-                        // EOF
-                        FD_CLR(fd, &set);
-                        if((fd_num = update_set(set, fd_num))<0){
-                            perror("Update set failed");
-                            close(fd);
-                            exit(EXIT_FAILURE);
-                        }
-                        close(fd);
-                    } else{
-                        cout << buf << "\n";
-                    }
-                }
-                */
             }
         }
     }
@@ -308,11 +287,13 @@ void *manage_client(void *arg)
         close(fd);
         pthread_exit(0); 
     }
+
+    cout << "\nHandshake successful" << endl;
+
     int keylen = EVP_CIPHER_key_length(EVP_aes_128_gcm());
     uint32_t seq_number = 0;
     command_t msg_type;
     string data = "";
-    unsigned char *message_tmp = NULL;
     int msg_len;
     vector<string> message;
 
@@ -323,17 +304,12 @@ void *manage_client(void *arg)
             // Update session key
             cout << "Key needs to be changed" << endl;
             key = update_key(fd, key, &seq_number);
-            cout << endl;
-            cout << seq_number << endl;
+            if(!key){
+                cout << "Update key failed" << endl;
+                disconnect_user(username, &logged_in);
+                break;
+            }
         }
-        // <command param1 .... paramN>
-        /*msg_type = my_read_message(fd, key, &message_tmp, &seq_number);
-        if (msg_type == OP_FAIL){
-            cout << "Failed to read message... terminating thread" << endl;
-            disconnect_user((string)username);
-            break;
-        }*/
-        // msg_type = read_authenticated_msg(fd, key, &seq_number);
         msg_type = read_message(fd, key, data, &seq_number);
         if (msg_type == OP_FAIL){
             cout << "Failed to read message... terminating thread" << endl;
@@ -342,14 +318,6 @@ void *manage_client(void *arg)
         }
         switch (msg_type){
             case LIST_REQ:{
-                // ----> forse è da reinserire *(message_tmp + CLR_FRAGMENT - 1) = '\0';
-                /*message = extract_params(string((char *)message_tmp));
-                // qui la richiesta è già decifrata
-                if (message.size() == 0)
-                {
-                    delete[] message_tmp;
-                    continue;
-                }*/
                 cout << "Request to list files" << endl;
                 if(!list(fd, username, &key, &seq_number))
                     disconnect_user(username, &logged_in);
@@ -388,7 +356,6 @@ void *manage_client(void *arg)
             default:
                 break;
         }
-        //delete[] message_tmp;
     }
     // FREE CRYPTO MATERIAL
     free_crypto(key, keylen);
@@ -398,7 +365,7 @@ void *manage_client(void *arg)
 
 unsigned char* handshake(int fd, string &username, int* status){
 
-    int err, size;
+    int err;
     unsigned char* clt_nonce = NULL;
     unsigned char *srv_nonce = NULL;
     unsigned char* shared_key = NULL;
@@ -422,9 +389,7 @@ unsigned char* handshake(int fd, string &username, int* status){
         if(err == 0) { error_occurred = true; break; }
         // Get message type
         memcpy(&msg_type, handshake_msg, sizeof(command_t));
-        cout << "Received command: " << msg_type << endl;
-        //err = readn(fd, &msg_type, sizeof(command_t));
-        //if(err <= 0) { error_occurred = true; break; }
+
         switch(msg_type){
             case HANDSHAKE_PH1: {
 
@@ -434,40 +399,25 @@ unsigned char* handshake(int fd, string &username, int* status){
 
                 NEW(clt_nonce, new unsigned char[NONCE_LEN], "client nonce");
                 memcpy(clt_nonce, handshake_msg + sizeof(command_t), NONCE_LEN);
-            
-                printf("Client nonce: \n");
-                BIO_dump_fp (stdout, (const char *)clt_nonce, NONCE_LEN);
 
                 int username_len;
                 memcpy(&username_len, handshake_msg + sizeof(command_t) + NONCE_LEN, sizeof(int));
-                cout << "Received " << username_len << endl;
 
                 char* clt_username;
                 NEW(clt_username, new char[(username_len+1)], "client username");
                 memcpy(clt_username, handshake_msg + sizeof(command_t) + NONCE_LEN + sizeof(int), username_len);
                 clt_username[username_len] = '\0';
-                // USERNAME SANIFICATION
                 username = (string)clt_username;
-                cout << "Usernamne: " << username << "!" << endl; 
 
                 delete [] handshake_msg;
                 if (!new_online_user(username, status)){
-                    cout << "Errore nello username" << endl;
-                    // user not registered or already online
-                    msg_type = HANDSHAKE_ERR;
+                    cout << "User not registered or already online" << endl;
+                    handshake_error(fd, "User not registered or already online");
                     error_occurred = true; 
-                    string reason_msg = "User not registered or already online";
-                    int reason_len = reason_msg.size();
-                    error_msg_len = sizeof(command_t) + sizeof(int) + reason_len;
-                    NEW(error_msg, new unsigned char[error_msg_len], "error message");
-                    memcpy(error_msg, &msg_type, sizeof(command_t));
-                    memcpy(error_msg + sizeof(command_t), &reason_len, sizeof(int));
-                    memcpy(error_msg + sizeof(command_t) + sizeof(int),reason_msg.c_str(), reason_len);
-                    send_data(fd, error_msg, error_msg_len);
-                    delete [] error_msg;
                     break;
                 }
 
+                cout << "Handshaking with " << username << endl;
                 /* ------------------------------------------------------------------------------------ */
                 /* Second phase SERVER EXCHANGE.                                                        */
                 /* Server generates Server.nonce, load the certtificate and compute the EECDH           */
@@ -479,12 +429,10 @@ unsigned char* handshake(int fd, string &username, int* status){
                 NEW(srv_nonce, new unsigned char[NONCE_LEN], "server nonce");
                 generate_random(srv_nonce, NONCE_LEN);
 
-                printf("Server nonce: \n");
-                BIO_dump_fp (stdout, (const char *)srv_nonce, NONCE_LEN);
-
                 srv_cert = get_certificate(CERTIFICATE_PATH);
                 if(!srv_cert){
                     cout << "ERRORE srv_cert" << endl;
+                    handshake_error(fd, "Server error");
                     error_occurred = true; break;
                 }
 
@@ -492,12 +440,14 @@ unsigned char* handshake(int fd, string &username, int* status){
                 my_dhkey = generate_pubkey();
                 if(!my_dhkey){
                     cout << "ERRORE mydhkey" << endl;
+                    handshake_error(fd, "Server error");
                     error_occurred = true; break;
                 }
 
                 int cert_buf_len = serialize_certificate(fd, srv_cert, &cert_buf);
                 if (cert_buf_len == 0){
                     cout << "ERRORE cert buf len" << endl;
+                    handshake_error(fd, "Server error");
                     error_occurred = true; break;
                 }
 
@@ -506,6 +456,7 @@ unsigned char* handshake(int fd, string &username, int* status){
                 int pubkey_buf_len = serialize_pubkey(fd, my_dhkey, &pubkey_buf);
                 if (pubkey_buf_len == 0){
                     cout << "ERRORE pubkey_buf_len" << endl;
+                    handshake_error(fd, "Server error");
                     error_occurred = true; break;
                 }
 
@@ -513,6 +464,7 @@ unsigned char* handshake(int fd, string &username, int* status){
                 FILE* prvkey_file = fopen(SRV_PRIVKEY_PATH, "r");
                 if(!prvkey_file){ 
                     cout << "ERRORE prvkey file" << endl;
+                    handshake_error(fd, "Server error");
                     error_occurred = true; break;
                 }
 
@@ -520,6 +472,7 @@ unsigned char* handshake(int fd, string &username, int* status){
                 fclose(prvkey_file);
                 if(!prvkey){
                     cout << "ERRORE prvkey" << endl;
+                    handshake_error(fd, "Server error");
                     error_occurred = true; break;
                 }
 
@@ -535,15 +488,12 @@ unsigned char* handshake(int fd, string &username, int* status){
                     cout << "ERRORE signature len" << endl;
                     delete [] to_sign;
                     delete [] signature;
+                    handshake_error(fd, "Server error");
                     error_occurred = true; break;
                 }
 
                 delete [] to_sign;
                 EVP_PKEY_free(prvkey); prvkey = NULL;
-
-                //printf("Server signature: \n");
-                //BIO_dump_fp (stdout, (const char *)signature, signature_len);
-                cout << cert_buf_len << " " << pubkey_buf_len << " " << signature_len << endl;
 
                 msg_type = HANDSHAKE_PH2;
                 handshake_msg_len = sizeof(command_t) + (NONCE_LEN*2) + (sizeof(int)*3) + cert_buf_len + pubkey_buf_len + signature_len;
@@ -563,9 +513,7 @@ unsigned char* handshake(int fd, string &username, int* status){
                 delete [] pubkey_buf; pubkey_buf = NULL;
                 delete [] signature; signature = NULL;
 
-                if(send_data(fd, handshake_msg, handshake_msg_len) == 0){
-                    // manage error
-                }
+                if(send_data(fd, handshake_msg, handshake_msg_len) == 0) error_occurred = true; break;
                 
                 delete [] handshake_msg;
                 break;
@@ -580,10 +528,16 @@ unsigned char* handshake(int fd, string &username, int* status){
                 /* Finally it sends < EECDH, Server.Nonce, Signature >                                  */
                 /* ------------------------------------------------------------------------------------ */
 
-                // CONTROLLARE SE IL SERVER NONCE CORRISPONDE
                 unsigned char* received_srv_nonce;
                 NEW(received_srv_nonce, new unsigned char[NONCE_LEN], "received srv nonce");
                 memcpy(received_srv_nonce, handshake_msg + sizeof(command_t), NONCE_LEN);
+
+                if(CRYPTO_memcmp(srv_nonce, received_srv_nonce, NONCE_LEN)!=0){
+                    cout << "Detect different nonces, abort" << endl;
+                    // nonces are different, abort
+                    handshake_error(fd, "Nonces are different");
+                    error_occurred = true; break;
+                }
 
                 int clt_pubkey_len, signature_len;
                 memcpy(&clt_pubkey_len, handshake_msg + sizeof(command_t) + NONCE_LEN, sizeof(int));
@@ -592,12 +546,10 @@ unsigned char* handshake(int fd, string &username, int* status){
                 unsigned char* clt_pubkey_buf; NEW(clt_pubkey_buf, new unsigned char[clt_pubkey_len], "server public key");
                 memcpy(clt_pubkey_buf, handshake_msg + sizeof(command_t) + NONCE_LEN + (sizeof(int)*2), clt_pubkey_len);
 
-                // printf("Client DH Pubkey: \n");
-                // BIO_dump_fp (stdout, (const char *)clt_pubkey_buf, clt_pubkey_len);
-
                 EVP_PKEY* clt_dh_pubkey = deserialize_pubkey(clt_pubkey_buf, clt_pubkey_len);
                 if(!clt_dh_pubkey){
                     cout << "ERROR: Deserialization of public key" << endl;
+                    handshake_error(fd, "Server error");
                     delete [] clt_pubkey_buf;
                     error_occurred = true; break;
                 }
@@ -605,16 +557,6 @@ unsigned char* handshake(int fd, string &username, int* status){
                 // Read signature
                 NEW(signature, new unsigned char[signature_len], "server signature");
                 memcpy(signature, handshake_msg + sizeof(command_t) + NONCE_LEN + (sizeof(int)*2) + clt_pubkey_len, signature_len);
-                //err = readn(fd, signature, signature_len);
-                //if(err <= 0){
-                //    delete [] clt_pubkey_buf;
-                //    delete [] signature;
-                //    EVP_PKEY_free(clt_dh_pubkey); 
-                //    error_occurred = true; break;
-                //}
-
-                // printf("Client signature: \n");
-                // BIO_dump_fp (stdout, (const char *)signature, signature_len);
 
                 // We need to verify signature
                 int to_verify_len = clt_pubkey_len + (NONCE_LEN*2);
@@ -628,15 +570,13 @@ unsigned char* handshake(int fd, string &username, int* status){
                 delete [] clt_pubkey_buf;
                 delete [] handshake_msg;
 
-                // printf("Plain signature: \n");
-                // BIO_dump_fp (stdout, (const char *)to_verify, to_verify_len);
-
                 // read client rsa public key
                 // First read server privkey
                 string path = registered_users.at(username);
                 FILE* clt_rsa_pubkey_file = fopen(path.c_str(), "r");
                 if(!clt_rsa_pubkey_file){ 
                     cout << "Errore rsa pubkey file" << endl;
+                    handshake_error(fd, "Server error");
                     delete [] signature;
                     delete [] to_verify;
                     EVP_PKEY_free(clt_dh_pubkey); 
@@ -647,6 +587,7 @@ unsigned char* handshake(int fd, string &username, int* status){
                 fclose(clt_rsa_pubkey_file);
                 if(!rsa_clt_pubkey){
                     cout << "Error reading rsa client pubkey" << endl;
+                    handshake_error(fd, "Server error");
                     delete [] signature;
                     delete [] to_verify;
                     EVP_PKEY_free(clt_dh_pubkey); 
@@ -656,41 +597,30 @@ unsigned char* handshake(int fd, string &username, int* status){
                 int verify = verify_signature(rsa_clt_pubkey, to_verify, to_verify_len, signature, signature_len);
                 if (verify == 0){
                     cout << "ERRORE Signature verification FAILED" << endl;
-                    // send error
+                    handshake_error(fd, "Signature verification failed");
                     delete [] signature;
                     delete [] to_verify;
                     EVP_PKEY_free(clt_dh_pubkey);
                     EVP_PKEY_free(rsa_clt_pubkey); 
                     error_occurred = true;
-                    //msg_type = HANDSHAKE_ERR;
-                    //string error_msg = "Signature verification FAILED";
-                    //int error_size = error_msg.size()+1;
-                    //writen(fd, &msg_type, sizeof(command_t));
-                    //writen(fd, &error_size, sizeof(int));
-                    //writen(fd, (void*)error_msg.c_str(), error_size);
                     break;
                 }
-
-                cout << "Signature verification: OK" << endl;
 
                 delete [] to_verify;
                 delete [] signature;
                 EVP_PKEY_free(rsa_clt_pubkey);
-
-                printf("------------------------ FASE 4 ------------------------\n");
 
                 // Derive the shared secret
                 unsigned char* skey = NULL;
                 int skeylen = derive_shared_secret(my_dhkey, clt_dh_pubkey, &skey);
                 if (skeylen == 0){
                     cout << "ERRORE skeylen" << endl;
+                    handshake_error(fd, "Server error");
                     EVP_PKEY_free(clt_dh_pubkey);
                     error_occurred = true;
                     break;
                 }
 
-                printf("Here it is the shared secret pre-hash: \n");
-                BIO_dump_fp (stdout, (const char *)skey, skeylen);
                 EVP_PKEY_free(clt_dh_pubkey);
                 // Using SHA-256 to extract a safe key!
                 unsigned char* digest; 
@@ -698,6 +628,7 @@ unsigned char* handshake(int fd, string &username, int* status){
                 int digestlen = hash_secret(digest, skey, skeylen);
                 if (digestlen == 0){
                     cout << "ERRORE digestlen" << endl;
+                    handshake_error(fd, "Server error");
                     free_crypto(skey, skeylen);
                     delete [] digest;
                     error_occurred = true; break;
@@ -707,8 +638,6 @@ unsigned char* handshake(int fd, string &username, int* status){
                 NEW(shared_key, new unsigned char[keylen], "shared secret");
                 memcpy(shared_key, digest, keylen);
 
-                printf("Here it is the shared secret: \n");
-                BIO_dump_fp (stdout, (const char *)shared_key, keylen);
                 free_crypto(digest, digestlen);
                 free_crypto(skey, skeylen);
                 handshake_finished = true;
@@ -723,7 +652,7 @@ unsigned char* handshake(int fd, string &username, int* status){
                 char *reason; NEW(reason, new char[reason_len+1], "reason msg");
                 memcpy(reason, handshake_msg + sizeof(command_t)+ sizeof(int), reason_len);
                 
-                reason[size] = '\0';
+                reason[reason_len] = '\0';
                 cout << reason << endl;
                 delete [] reason;
                 delete [] handshake_msg;
@@ -753,8 +682,22 @@ unsigned char* handshake(int fd, string &username, int* status){
     return shared_key;
 }
 
+void handshake_error(int fd, string reason_msg){
+    // user not registered or already online
+    command_t msg_type = HANDSHAKE_ERR;
+    int reason_len = reason_msg.size();
+    int error_msg_len = sizeof(command_t) + sizeof(int) + reason_len;
+    unsigned char* _error_msg = NULL;
+    NEW(_error_msg, new unsigned char[error_msg_len], "error message");
+    memcpy(_error_msg, &msg_type, sizeof(command_t));
+    memcpy(_error_msg + sizeof(command_t), &reason_len, sizeof(int));
+    memcpy(_error_msg + sizeof(command_t) + sizeof(int),reason_msg.c_str(), reason_len);
+    send_data(fd, _error_msg, error_msg_len);
+    delete [] _error_msg;
+    return;
+}
+
 unsigned char* update_key(int fd, unsigned char* key, uint32_t* seq_number){
-    cout << *seq_number << endl;
     // Reading update key request
     command_t msg_type = read_authenticated_msg(fd, key, seq_number);
     if(msg_type != UPDATE_KEY_REQ){
@@ -763,9 +706,7 @@ unsigned char* update_key(int fd, unsigned char* key, uint32_t* seq_number){
     }
 
     int err = send_authenticated_msg(fd, key, UPDATE_KEY_ACK, seq_number);
-    if(err == 0){
-        return NULL;
-    }
+    if(err == 0) return NULL;
 
     // Now we can start the new exchange
     int msg_len = 0;
@@ -780,24 +721,28 @@ unsigned char* update_key(int fd, unsigned char* key, uint32_t* seq_number){
     my_dhkey = generate_pubkey();
     if(!my_dhkey){
         cout << "ERRORE mydh key" << endl;
+        return NULL;
     }
+
     int pubkey_buf_len = serialize_pubkey(fd, my_dhkey, &pubkey_buf);
     if (pubkey_buf_len == 0){
         cout << "ERRORE pubkey buf len" << endl;
+        return NULL;
     }
 
     msg_type = read_data_message(fd, key, &clt_pubkey_buf, &clt_pubkey_len, seq_number);
     if(msg_type == OP_FAIL){
+        return NULL;
     }
+
     clt_dh_pubkey = deserialize_pubkey(clt_pubkey_buf, clt_pubkey_len);
     if(!clt_dh_pubkey){
         cout << "Errore dh srv" << endl;
+        return NULL;
     }
 
     err = send_data_message(fd, key, UPDATE_KEY_REQ, pubkey_buf, pubkey_buf_len, seq_number);
-    if (err == 0){
-        //check errors
-    }
+    if (err == 0) return NULL;
 
     delete [] clt_pubkey_buf;
     delete [] pubkey_buf;
@@ -807,10 +752,9 @@ unsigned char* update_key(int fd, unsigned char* key, uint32_t* seq_number){
     int skeylen = derive_shared_secret(my_dhkey, clt_dh_pubkey, &skey);
     if (skeylen == 0){
         cout << "ERRORE skeylen" << endl;
+        return NULL;
     }
 
-    printf("Here it is the shared secret pre-hash: \n");
-    BIO_dump_fp (stdout, (const char *)skey, skeylen);
     // Using SHA-256 to extract a safe key!
     unsigned char* digest; 
     NEW(digest, new unsigned char[EVP_MD_size(EVP_sha256())], "digest for secret key");
@@ -818,6 +762,7 @@ unsigned char* update_key(int fd, unsigned char* key, uint32_t* seq_number){
     if (digestlen == 0){
         cout << "ERRORE digestlen1" << endl;
         free_crypto(skey, skeylen);
+        return NULL;
     }
 
     int keylen = EVP_CIPHER_key_length(EVP_aes_128_gcm());
@@ -825,8 +770,7 @@ unsigned char* update_key(int fd, unsigned char* key, uint32_t* seq_number){
     unsigned char* shared_key = NULL;
     NEW(shared_key, new unsigned char[keylen], "shared secret");
     memcpy(shared_key, digest, keylen);
-    printf("Here it is the shared secret: \n");
-    BIO_dump_fp (stdout, (const char *)shared_key, keylen);
+
     free_crypto(digest, digestlen);
     free_crypto(skey, skeylen);
     *seq_number = 0;
@@ -834,23 +778,6 @@ unsigned char* update_key(int fd, unsigned char* key, uint32_t* seq_number){
     free_crypto(key, keylen);
 
     return shared_key;
-}
-
-/* to be deprecated */
-vector<string> extract_params(string message){
-    string delim = " ";
-    vector<string> request;
-    // CONTROLLARE LA STRINGA CON CANONICALIZATION E SANIFICATION
-    size_t pos = 0;
-    while ((pos = message.find(delim)) != string::npos)
-    {
-        request.push_back(message.substr(0, pos));
-        message.erase(0, pos + delim.length());
-    }
-    if (!message.empty())
-        request.push_back(message.substr(0, pos));
-
-    return request;
 }
 
 bool list(int fd, string username, unsigned char **key, uint32_t* seq_number){
@@ -887,8 +814,10 @@ bool list(int fd, string username, unsigned char **key, uint32_t* seq_number){
             // Update session key
             cout << "Key needs to be changed" << endl;
             *key = update_key(fd, *key, seq_number);
-            cout << endl;
-            cout << *seq_number << endl;
+            if(!*key){
+                cout << "Update key failed" << endl;
+                return false;
+            }
         }
         if(nfiles == 1) msg_type = LIST_DONE;
         err = send_message(fd, *key, msg_type, *iter, seq_number);
