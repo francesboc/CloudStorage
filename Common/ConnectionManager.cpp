@@ -41,7 +41,7 @@ int send_data(int fd, unsigned char* message, int len){
     int err;
     err = writen(fd, &len, sizeof(int));
     if(err <= 0){
-        cerr << "Fail to write message" << endl;
+        cerr << "Fail to write message len" << endl;
         return 0;
     }
     err = writen(fd, message, len);
@@ -57,7 +57,7 @@ int read_data(int fd, unsigned char** message, int* len){
     int err;
     err = readn(fd, len, sizeof(int));
     if(err <= 0){
-        cerr << "Fail to read message" << endl;
+        cerr << "Fail to read message len" << endl;
         return 0;
     }
     NEW(*message, new unsigned char[*len], "new message");
@@ -75,7 +75,7 @@ int send_udata(int fd, unsigned char* message, unsigned int len){
     int err;
     err = writen(fd, &len, sizeof(unsigned int));
     if(err <= 0){
-        cerr << "Fail to write message" << endl;
+        cerr << "Fail to write message len" << endl;
         return 0;
     }
     err = writen(fd, message, len);
@@ -91,7 +91,7 @@ int read_udata(int fd, unsigned char** message, unsigned int* len){
     int err;
     err = readn(fd, len, sizeof(unsigned int));
     if(err <= 0){
-        cerr << "Fail to read message" << endl;
+        cerr << "Fail to read message len" << endl;
         return 0;
     }
     NEW(*message, new unsigned char[*len], "new message");
@@ -176,8 +176,6 @@ command_t read_authenticated_msg(int fd, unsigned char* key, uint32_t* seq_numbe
     memcpy(aads, &msg_type, sizeof(command_t));
     memcpy(aads + sizeof(command_t), &received_seq_number, sizeof(uint32_t));
     memcpy(aads + sizeof(command_t) + sizeof(uint32_t), iv, IV_SIZE);
-    //cout << "Received sequence number " << received_seq_number << endl;
-    //cout << "Received message type " << msg_type << endl;
     memcpy(tag_buf, request + sizeof(command_t) + sizeof(uint32_t) + IV_SIZE, TAG_SIZE);
     delete [] request;
     
@@ -309,7 +307,7 @@ command_t read_message(int fd, unsigned char* key, string &plaintext, uint32_t *
     return msg_type;
 }
 
-int send_data_message(int fd, unsigned char* key, command_t msg_type, unsigned char* plaintext, int pt_len, uint32_t* seq_number){
+int send_data_message(int fd, unsigned char* key, command_t msg_type, unsigned char* plaintext, unsigned int pt_len, uint32_t* seq_number){
     unsigned char* iv;  NEW(iv, new unsigned char[IV_SIZE], "new iv");
     generate_random(iv, IV_SIZE);
 
@@ -421,9 +419,9 @@ command_t read_data_message(int fd, unsigned char* key, unsigned char** plaintex
 }
 
 /**
-* @brief Serializa a X509 into an unsigned char
+* @brief Serialize a X509 into an unsigned char
 */
-int serialize_certificate(int fd, X509* srv_cert, unsigned char** cert_buf){
+unsigned int serialize_certificate(int fd, X509* srv_cert, unsigned char** cert_buf){
     BIO* bio = BIO_new(BIO_s_mem());
     if(!bio){ cerr << "ERROR: Allocating bio" << endl; return 0; }
     if (1 != PEM_write_bio_X509(bio, srv_cert)) { 
@@ -431,7 +429,7 @@ int serialize_certificate(int fd, X509* srv_cert, unsigned char** cert_buf){
         BIO_free(bio);
         return 0;
     }
-    int cert_buf_len = BIO_ctrl_pending(bio);
+    unsigned int cert_buf_len = BIO_ctrl_pending(bio);
     NEW(*cert_buf, new unsigned char[cert_buf_len], "pubkey serialization");
     if(BIO_read(bio, *cert_buf, cert_buf_len)<=0) { 
         cerr << "ERROR: BIO_read" << endl;
@@ -446,7 +444,7 @@ int serialize_certificate(int fd, X509* srv_cert, unsigned char** cert_buf){
 /**
 * @brief Serializa a EVP_PKEY into an unsigned char
 */
-int serialize_pubkey(int fd, EVP_PKEY* pubkey, unsigned char** pubkey_buf){
+unsigned int serialize_pubkey(int fd, EVP_PKEY* pubkey, unsigned char** pubkey_buf){
     BIO* bio = BIO_new(BIO_s_mem());
     if(!bio){ cerr << "ERROR: Allocating bio" << endl; return 0; }
     if (1 != PEM_write_bio_PUBKEY(bio, pubkey)) { 
@@ -454,7 +452,7 @@ int serialize_pubkey(int fd, EVP_PKEY* pubkey, unsigned char** pubkey_buf){
         BIO_free(bio);
         return 0;
     }
-    int pubkey_len = BIO_ctrl_pending(bio);
+    unsigned int pubkey_len = BIO_ctrl_pending(bio);
     NEW(*pubkey_buf, new unsigned char[pubkey_len], "pubkey serialization");
     if(BIO_read(bio, *pubkey_buf, pubkey_len)<=0) { 
         cerr << "ERROR: BIO_read" << endl;
@@ -465,7 +463,7 @@ int serialize_pubkey(int fd, EVP_PKEY* pubkey, unsigned char** pubkey_buf){
     return pubkey_len;
 }
 
-X509* deserialize_certificate(unsigned char* srv_cert_buf, int srv_cert_len){
+X509* deserialize_certificate(unsigned char* srv_cert_buf, unsigned int srv_cert_len){
     BIO* bio = BIO_new(BIO_s_mem());
     if(!bio) { cerr << "ERROR: Allocating bio" << endl; return NULL; }
 
@@ -481,7 +479,7 @@ X509* deserialize_certificate(unsigned char* srv_cert_buf, int srv_cert_len){
     return cert;
 }
 
-EVP_PKEY* deserialize_pubkey(unsigned char* srv_pubkey_buf, int srv_pubkey_len){
+EVP_PKEY* deserialize_pubkey(unsigned char* srv_pubkey_buf, unsigned int srv_pubkey_len){
     BIO* bio = BIO_new(BIO_s_mem());
     if(!bio) { cerr << "ERROR: Allocating bio" << endl; return NULL; }
 
@@ -540,13 +538,60 @@ void error_msg_type(string msg, command_t msg_type){
     }
 }
 
-bool canonicalize1(string file, string ok_dir){
-    char* canon_file = realpath(file.c_str(), NULL);
-    if(!canon_file) return false;
-    if(strncmp(canon_file, ok_dir.c_str(), strlen(ok_dir.c_str())) != 0) { 
-        // Unauthorized path!
-        free(canon_file); 
-        return false; 
+bool unsigned_math(string op, unsigned int a, unsigned int b, unsigned int* result){
+    map<string,int> commands;
+    commands.insert(pair<string,int>("sum",1));
+    commands.insert(pair<string,int>("sub", 2));
+    commands.insert(pair<string,int>("div",3));
+    commands.insert(pair<string,int>("mul",4));
+    commands.insert(pair<string,int>("increment",5));
+    commands.insert(pair<string,int>("decrement",6));
+    commands.insert(pair<string,int>("module",7));
+    switch(commands[op]){
+        case 1:{
+            // sum
+            if(a > UINT_MAX - b) return false;
+            *result = a + b;
+            return true;
+        }
+        case 2:{
+            // subtraction
+            if (a < b) return false;
+            *result = a - b;
+            return true;
+        }
+        case 3:{
+            // division
+            if (b==0) return false;
+            *result = a/b;
+            return true;
+        }
+        case 4:{
+            // mul
+            if(b!= 0 && a > UINT_MAX/b) return false;
+            *result = a*b;
+            return true;
+        }
+        case 5:{
+            // increment
+            if(a == UINT_MAX) return false;
+            *result = a++;
+            return true;
+        }
+        case 6:{
+            // decrement
+            if(a == 0) return false;
+            *result = a--;
+            return true;
+        }
+        case 7:{
+            //module
+            if(b==0) return false;
+            *result = a%b;
+            return true;
+        }
+        default:{
+            return false;
+        }
     }
-    return true;
 }

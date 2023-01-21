@@ -206,7 +206,7 @@ int gcm_verify(unsigned char *aad, int aad_len,
     }
 
 }
-int sign(EVP_PKEY* priv_key, unsigned char* buf, int buf_len, unsigned char* signature){
+unsigned int sign(EVP_PKEY* priv_key, unsigned char* buf, unsigned int buf_len, unsigned char* signature){
     unsigned int signature_len = 0;
     EVP_MD_CTX* md_ctx = EVP_MD_CTX_new();
     if(!md_ctx){
@@ -233,7 +233,7 @@ int sign(EVP_PKEY* priv_key, unsigned char* buf, int buf_len, unsigned char* sig
     return signature_len;
 }
 
-int verify_signature(EVP_PKEY* pubkey, unsigned char* buf, int buf_len, unsigned char* signature, int sig_len){
+int verify_signature(EVP_PKEY* pubkey, unsigned char* buf, unsigned int buf_len, unsigned char* signature, unsigned int sig_len){
     int err;
     EVP_MD_CTX* md_ctx = EVP_MD_CTX_new();
     // AD ogni return libera il context
@@ -374,7 +374,7 @@ int derive_shared_secret(EVP_PKEY* dhkey1, EVP_PKEY* dhkey2, unsigned char** ske
     return skeylen;
 }
 
-int hash_secret(unsigned char* digest, unsigned char* skey, int skeylen){
+unsigned int hash_secret(unsigned char* digest, unsigned char* skey, unsigned int skeylen){
     unsigned int digestlen;	
     // Create and init context
     EVP_MD_CTX *Hctx;
@@ -395,5 +395,5 @@ void free_crypto(unsigned char* buf, size_t size){
 #pragma optimize("", off)
     memset(buf, 0, size);
 #pragma optmize("", on)
-    //delete [] buf;
+    delete [] buf;
 }

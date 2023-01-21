@@ -10,8 +10,8 @@
 #include "../Common/utils.h"
 #include "../Common/crypto.h"
 #include <fstream>
-#include <map>
 
+#define IP "127.0.0.1"
 #define PORT 4333
 
 bool list_command(int fd, unsigned char** key, uint32_t* seq_number);
@@ -19,8 +19,6 @@ bool delete_command(int fd, unsigned char* key, uint32_t* seq_number);
 bool upload_command(int fd, unsigned char* key, uint32_t* seq_number);
 bool download_command(int fd, unsigned char* key, uint32_t* seq_number);
 bool rename_command(int fd, unsigned char* key, uint32_t* seq_number);
-//int logout(int fd, unsigned char* key, int* seq_number);
-void canonicalize(string s1);
 
 void show_welcome_msg();
 void help_msg();
@@ -28,11 +26,9 @@ void help_msg();
 unsigned char* handshake(int fd, string username);
 void handshake_error(int fd, string reason_msg);
 unsigned char* update_key(int fd, unsigned char* key, uint32_t* seq_number);
-bool unsigned_math(string op, unsigned int a, unsigned int b, unsigned int* result);
 
 string USERNAME;
 string STORAGE_PATH;
-string STORAGE_HOME;
 string USER_PATH;
 string CA_CERT_PATH;
 string CA_CRL_PATH;
@@ -48,7 +44,8 @@ int main(){
         cout << "Username not valid. Please retry." << endl;
         return 0;
     }
-
+    if(USERNAME.size() > USRNM_LEN) USERNAME.resize(USRNM_LEN);
+    
     int client_skt;
     struct sockaddr_in address;
 
@@ -57,7 +54,7 @@ int main(){
     address.sin_port = htons(PORT);
 
     // Convert IPv4 and IPv6 addresses from text to binary form
-    if (inet_pton(AF_INET, "127.0.0.1", &address.sin_addr) <= 0) {
+    if (inet_pton(AF_INET, IP, &address.sin_addr) <= 0) {
         perror("Invalid address/ Address not supported");
         exit(EXIT_FAILURE);
     }
@@ -88,12 +85,13 @@ int main(){
     commands.insert(pair<string,int>("help",HELP));
 
     string command;
-    
-    USER_PATH = "./" + USERNAME;
-    STORAGE_PATH = "./" + USERNAME + "/storage/";
-    STORAGE_HOME = "/home/applied/Desktop/CloudStorage/Client/" + USERNAME + "/storage/";
-    CA_CERT_PATH = USER_PATH + "/FoundationsOfCybersecurity_cert.pem";
-    CA_CRL_PATH = USER_PATH + "/FoundationsOfCybersecurity_crl.pem";
+    char cwd[256]; 
+    if(getcwd(cwd, 256) == NULL) exit(EXIT_FAILURE);
+
+    USER_PATH = (string)cwd + (string)"/" + USERNAME;
+    STORAGE_PATH = USER_PATH + (string)"/storage/";
+    CA_CERT_PATH = USER_PATH + (string)"/FoundationsOfCybersecurity_cert.pem";
+    CA_CRL_PATH = USER_PATH + (string)"/FoundationsOfCybersecurity_crl.pem";
 
     unsigned char* key = handshake(client_skt, USERNAME);
     if (!key) {
@@ -108,13 +106,14 @@ int main(){
     int logged_in = 1;
     while(logged_in){
         // Check if a key update is needed (to avoid seq number wrap around)
-        if(seq_number >= (UINT32_MAX - UPDATE_KEY_LIMIT)){
+        if(seq_number >= (UINT32_MAX - UPDATE_KEY_LIMIT)){  
             // Update session key
             cout << "Key needs to be changed" << endl;
             key = update_key(client_skt, key, &seq_number);
             if(!key){
                 cout << "Update key failed" << endl;
                 close(client_skt);
+                free_crypto(key,keylen);
                 return 0;
             }
         }
@@ -184,7 +183,8 @@ int main(){
 
 unsigned char* handshake(int fd, string username){
 
-    int err, handshake_msg_len;
+    int err;
+    unsigned int handshake_msg_len;
     unsigned char* srv_nonce = NULL; 
     unsigned char* shared_key = NULL;
     unsigned char* srv_cert_buf = NULL;
@@ -203,24 +203,22 @@ unsigned char* handshake(int fd, string username){
     generate_random(clt_nonce, NONCE_LEN);
 
     cout << "Generating crypto material..." << endl;
-    int username_size = username.size();
+    unsigned int username_size = username.size();
     msg_type = HANDSHAKE_PH1;
 
-    unsigned int handshake_msg_len1;
-    if(!unsigned_math("sum", (sizeof(command_t) + NONCE_LEN + sizeof(int)), username_size, &handshake_msg_len1)){
+    if(!unsigned_math("sum", (sizeof(command_t) + NONCE_LEN + sizeof(unsigned int)), username_size, &handshake_msg_len)){
+        cout << "Overflow error" << endl;
         delete [] clt_nonce;
         return NULL;
     }
 
-    handshake_msg_len = sizeof(command_t) + NONCE_LEN + sizeof(int) + username_size;
-
     NEW(handshake_msg, new unsigned char[handshake_msg_len], "phase1: handshake msg");
     memcpy(handshake_msg, &msg_type, sizeof(command_t));
     memcpy(handshake_msg + sizeof(command_t), clt_nonce, NONCE_LEN);
-    memcpy(handshake_msg + sizeof(command_t) + NONCE_LEN, &username_size, sizeof(int));
-    memcpy(handshake_msg + sizeof(command_t) + NONCE_LEN + sizeof(int), username.c_str(), username_size);
+    memcpy(handshake_msg + sizeof(command_t) + NONCE_LEN, &username_size, sizeof(unsigned int));
+    memcpy(handshake_msg + sizeof(command_t) + NONCE_LEN + sizeof(unsigned int), username.c_str(), username_size);
 
-    err = send_data(fd, handshake_msg, handshake_msg_len);
+    err = send_udata(fd, handshake_msg, handshake_msg_len);
     delete [] handshake_msg;
     if(err == 0){
         delete [] clt_nonce;
@@ -231,7 +229,7 @@ unsigned char* handshake(int fd, string username){
     bool error_occurred = false;
     
     while(!handshake_finished && !error_occurred){
-        err = read_data(fd, &handshake_msg, &handshake_msg_len);
+        err = read_udata(fd, &handshake_msg, &handshake_msg_len);
         if(err == 0) { error_occurred = true; break; }
         
         // Get message type
@@ -263,16 +261,16 @@ unsigned char* handshake(int fd, string username){
                 }
 
                 // Get server certificate
-                int srv_cert_len, srv_pubkey_len, signature_len;
-                memcpy(&srv_cert_len, handshake_msg + sizeof(command_t) + (NONCE_LEN*2), sizeof(int));
-                memcpy(&srv_pubkey_len, handshake_msg + sizeof(command_t) + (NONCE_LEN*2) + sizeof(int), sizeof(int));
-                memcpy(&signature_len, handshake_msg + sizeof(command_t) + (NONCE_LEN*2) + (sizeof(int)*2), sizeof(int));
+                unsigned int srv_cert_len, srv_pubkey_len, signature_len;
+                memcpy(&srv_cert_len, handshake_msg + sizeof(command_t) + (NONCE_LEN*2), sizeof(unsigned int));
+                memcpy(&srv_pubkey_len, handshake_msg + sizeof(command_t) + (NONCE_LEN*2) + sizeof(unsigned int), sizeof(unsigned int));
+                memcpy(&signature_len, handshake_msg + sizeof(command_t) + (NONCE_LEN*2) + (sizeof(unsigned int)*2), sizeof(unsigned int));
 
                 NEW(srv_cert_buf, new unsigned char[srv_cert_len], "server certificate");
-                memcpy(srv_cert_buf, handshake_msg + sizeof(command_t) + (NONCE_LEN*2) + (sizeof(int)*3), srv_cert_len);
+                memcpy(srv_cert_buf, handshake_msg + sizeof(command_t) + (NONCE_LEN*2) + (sizeof(unsigned int)*3), srv_cert_len);
 
                 NEW(srv_pubkey_buf, new unsigned char[srv_pubkey_len], "server public key");
-                memcpy(srv_pubkey_buf, handshake_msg + sizeof(command_t) + (NONCE_LEN*2) + (sizeof(int)*3) + srv_cert_len, srv_pubkey_len);
+                memcpy(srv_pubkey_buf, handshake_msg + sizeof(command_t) + (NONCE_LEN*2) + (sizeof(unsigned int)*3) + srv_cert_len, srv_pubkey_len);
 
                 srv_cert = deserialize_certificate(srv_cert_buf, srv_cert_len);
                 if(!srv_cert){ 
@@ -289,10 +287,10 @@ unsigned char* handshake(int fd, string username){
                 }
 
                 unsigned char* signature; NEW(signature, new unsigned char[signature_len], "server signature");
-                memcpy(signature, handshake_msg + sizeof(command_t) + (NONCE_LEN*2) + (sizeof(int)*3) + srv_cert_len + srv_pubkey_len, signature_len);
+                memcpy(signature, handshake_msg + sizeof(command_t) + (NONCE_LEN*2) + (sizeof(unsigned int)*3) + srv_cert_len + srv_pubkey_len, signature_len);
                 
                 delete [] handshake_msg;
-
+                
                 // Load the CA's certificate
                 FILE* cacert_file = fopen(CA_CERT_PATH.c_str(), "r");
                 if(!cacert_file){ 
@@ -340,7 +338,14 @@ unsigned char* handshake(int fd, string username){
                 }
                 
                 // We need to verify signature
-                int to_verify_len = srv_pubkey_len + (NONCE_LEN*2);
+                unsigned int to_verify_len;
+                if(!unsigned_math("sum",srv_pubkey_len, (NONCE_LEN*2), &to_verify_len)){
+                    cout << "Overflow error" << endl;
+                    handshake_error(fd, "Client error");
+                    delete [] signature;
+                    error_occurred = true; break;
+                }
+
                 unsigned char* to_verify; NEW(to_verify, new unsigned char[to_verify_len], "to_verify buffer");
                 memcpy(to_verify, srv_pubkey_buf, srv_pubkey_len);
                 memcpy(to_verify + srv_pubkey_len, clt_nonce, NONCE_LEN);
@@ -387,7 +392,7 @@ unsigned char* handshake(int fd, string username){
                 }
 
                 unsigned char* pubkey_buf;
-                int pubkey_buf_len = serialize_pubkey(fd, my_dhkey, &pubkey_buf);
+                unsigned int pubkey_buf_len = serialize_pubkey(fd, my_dhkey, &pubkey_buf);
                 if (pubkey_buf_len == 0){
                     cout << "ERRORE pubkey buf len" << endl;
                     handshake_error(fd, "Client error");
@@ -413,7 +418,13 @@ unsigned char* handshake(int fd, string username){
                     error_occurred = true; break; 
                 }
 
-                int to_sign_len = pubkey_buf_len + (NONCE_LEN*2);
+                unsigned int to_sign_len;
+                if(!unsigned_math("sum", pubkey_buf_len, (NONCE_LEN*2), &to_sign_len)){
+                    cout << "Overflow error" << endl;
+                    handshake_error(fd, "Client error");
+                    delete [] pubkey_buf;
+                    error_occurred = true; break; 
+                }
                 unsigned char* to_sign; NEW(to_sign, new unsigned char[to_sign_len], "to sign buffer");
                 memcpy(to_sign, pubkey_buf, pubkey_buf_len);
                 memcpy(to_sign + pubkey_buf_len, clt_nonce, NONCE_LEN);
@@ -435,16 +446,26 @@ unsigned char* handshake(int fd, string username){
                 EVP_PKEY_free(prvkey);
 
                 msg_type = HANDSHAKE_PH3;
-                handshake_msg_len = sizeof(command_t) + NONCE_LEN + (sizeof(int)*2) + pubkey_buf_len + signature_len;
+                bool ok_math = true && unsigned_math("sum", (sizeof(command_t) + NONCE_LEN + (sizeof(unsigned int)*2)), pubkey_buf_len, &handshake_msg_len);
+                ok_math = ok_math && unsigned_math("sum", handshake_msg_len, signature_len, &handshake_msg_len);
+                if(!ok_math){
+                    cout << "Overflow error" << endl;
+                    handshake_error(fd, "Client error");
+                    delete [] pubkey_buf;
+                    delete [] signature;
+                    EVP_PKEY_free(prvkey);
+                    error_occurred = true; break; 
+                }
+
                 NEW(handshake_msg, new unsigned char[handshake_msg_len], "phase3: handshake msg");
                 memcpy(handshake_msg, &msg_type, sizeof(command_t));
                 memcpy(handshake_msg + sizeof(command_t), srv_nonce, NONCE_LEN);
-                memcpy(handshake_msg + sizeof(command_t) + NONCE_LEN, &pubkey_buf_len, sizeof(int));
-                memcpy(handshake_msg + sizeof(command_t) + NONCE_LEN + sizeof(int), &signature_len, sizeof(int));
-                memcpy(handshake_msg + sizeof(command_t) + NONCE_LEN + (sizeof(int)*2), pubkey_buf, pubkey_buf_len);
-                memcpy(handshake_msg + sizeof(command_t) + NONCE_LEN + (sizeof(int)*2) + pubkey_buf_len, signature, signature_len);
+                memcpy(handshake_msg + sizeof(command_t) + NONCE_LEN, &pubkey_buf_len, sizeof(unsigned int));
+                memcpy(handshake_msg + sizeof(command_t) + NONCE_LEN + sizeof(unsigned int), &signature_len, sizeof(unsigned int));
+                memcpy(handshake_msg + sizeof(command_t) + NONCE_LEN + (sizeof(unsigned int)*2), pubkey_buf, pubkey_buf_len);
+                memcpy(handshake_msg + sizeof(command_t) + NONCE_LEN + (sizeof(unsigned int)*2) + pubkey_buf_len, signature, signature_len);
 
-                err = send_data(fd, handshake_msg, handshake_msg_len);
+                err = send_udata(fd, handshake_msg, handshake_msg_len);
                 if (err == 0){error_occurred = true; break;}
 
                 delete [] handshake_msg;                
@@ -453,7 +474,7 @@ unsigned char* handshake(int fd, string username){
 
                 // Derive the shared secret
                 unsigned char* skey;
-                int skeylen = derive_shared_secret(my_dhkey, srv_dh_pubkey, &skey);
+                unsigned int skeylen = derive_shared_secret(my_dhkey, srv_dh_pubkey, &skey);
                 if (skeylen == 0){
                     cout << "ERRORE skeylen" << endl;
                     handshake_error(fd, "Client error");
@@ -464,7 +485,7 @@ unsigned char* handshake(int fd, string username){
                 unsigned char* digest; 
                 NEW(digest, new unsigned char[EVP_MD_size(EVP_sha256())], "digest for secret key");
 
-                int digestlen = hash_secret(digest, skey, skeylen);
+                unsigned int digestlen = hash_secret(digest, skey, skeylen);
                 if (digestlen == 0){
                     cout << "ERRORE digestlen1" << endl;
                     handshake_error(fd, "Client error");
@@ -472,7 +493,7 @@ unsigned char* handshake(int fd, string username){
                     error_occurred = true; break; 
                 }
 
-                int keylen = EVP_CIPHER_key_length(EVP_aes_128_gcm());
+                unsigned int keylen = EVP_CIPHER_key_length(EVP_aes_128_gcm());
                 NEW(shared_key, new unsigned char[keylen], "shared secret");
                 memcpy(shared_key, digest, keylen);
 
@@ -484,11 +505,11 @@ unsigned char* handshake(int fd, string username){
             case HANDSHAKE_ERR:{
                 cout << "Something went wrong during handshake:" << endl;
                 
-                int reason_len;
-                memcpy(&reason_len, handshake_msg + sizeof(command_t), sizeof(int));
+                unsigned int reason_len;
+                memcpy(&reason_len, handshake_msg + sizeof(command_t), sizeof(unsigned int));
 
                 char *reason; NEW(reason, new char[reason_len+1], "reason msg");
-                memcpy(reason, handshake_msg + sizeof(command_t)+ sizeof(int), reason_len);
+                memcpy(reason, handshake_msg + sizeof(command_t)+ sizeof(unsigned int), reason_len);
                 
                 reason[reason_len] = '\0';
                 cout << reason << endl;
@@ -523,12 +544,12 @@ void handshake_error(int fd, string reason_msg){
     // user not registered or already online
     command_t msg_type = HANDSHAKE_ERR;
     int reason_len = reason_msg.size();
-    int error_msg_len = sizeof(command_t) + sizeof(int) + reason_len;
+    int error_msg_len = sizeof(command_t) + sizeof(unsigned int) + reason_len;
     unsigned char* _error_msg = NULL;
     NEW(_error_msg, new unsigned char[error_msg_len], "error message");
     memcpy(_error_msg, &msg_type, sizeof(command_t));
-    memcpy(_error_msg + sizeof(command_t), &reason_len, sizeof(int));
-    memcpy(_error_msg + sizeof(command_t) + sizeof(int),reason_msg.c_str(), reason_len);
+    memcpy(_error_msg + sizeof(command_t), &reason_len, sizeof(unsigned int));
+    memcpy(_error_msg + sizeof(command_t) + sizeof(unsigned int),reason_msg.c_str(), reason_len);
     send_data(fd, _error_msg, error_msg_len);
     delete [] _error_msg;
     return;
@@ -547,7 +568,6 @@ unsigned char* update_key(int fd, unsigned char* key, uint32_t* seq_number){
         return NULL;
 
     // Now we can start the new exchange
-    int msg_len = 0;
     unsigned char* update_key_msg = NULL;
     unsigned char* pubkey_buf = NULL;
     unsigned char* srv_pubkey_buf = NULL;
@@ -562,7 +582,7 @@ unsigned char* update_key(int fd, unsigned char* key, uint32_t* seq_number){
         return NULL;
     }
 
-    int pubkey_buf_len = serialize_pubkey(fd, my_dhkey, &pubkey_buf);
+    unsigned int pubkey_buf_len = serialize_pubkey(fd, my_dhkey, &pubkey_buf);
     if (pubkey_buf_len == 0){
         cout << "ERRORE pubkey buf len" << endl;
         return NULL;
@@ -586,7 +606,7 @@ unsigned char* update_key(int fd, unsigned char* key, uint32_t* seq_number){
 
     // Derive new shared secret
     unsigned char* skey;
-    int skeylen = derive_shared_secret(my_dhkey, srv_dh_pubkey, &skey);
+    unsigned int skeylen = derive_shared_secret(my_dhkey, srv_dh_pubkey, &skey);
     if (skeylen == 0){
         cout << "ERRORE skeylen" << endl;
         return NULL;
@@ -595,7 +615,7 @@ unsigned char* update_key(int fd, unsigned char* key, uint32_t* seq_number){
     // Using SHA-256 to extract a safe key!
     unsigned char* digest; 
     NEW(digest, new unsigned char[EVP_MD_size(EVP_sha256())], "digest for secret key");
-    int digestlen = hash_secret(digest, skey, skeylen);
+    unsigned int digestlen = hash_secret(digest, skey, skeylen);
     if (digestlen == 0){
         cout << "ERRORE digestlen1" << endl;
         free_crypto(skey, skeylen);
@@ -613,7 +633,7 @@ unsigned char* update_key(int fd, unsigned char* key, uint32_t* seq_number){
 
     // Free previous key
     free_crypto(key, keylen);
-
+    cout << "Shared key updated" << endl;
     return shared_key;
 }
 
@@ -678,6 +698,7 @@ bool delete_command(int fd, unsigned char* key, uint32_t* seq_number){
         cout << "Filename not valid." << endl;
         return true;
     }
+    if(file.size() > FILENAME_SIZE) file.resize(FILENAME_SIZE);
 
     int err = send_message(fd, key, DELETE_REQ, file, seq_number);
     if (err == 0){
@@ -739,12 +760,13 @@ bool upload_command(int fd, unsigned char* key, uint32_t* seq_number){
         cout << "Filename not valid." << endl;
         return true;
     }
+    if(filename.size() > FILENAME_SIZE) filename.resize(FILENAME_SIZE);
 
     string filepath = STORAGE_PATH + filename;
     // canonicalizing path
     char* canon_file = realpath(filepath.c_str(), NULL);
     if(canon_file){
-        if(strncmp(canon_file, STORAGE_HOME.c_str(), strlen(STORAGE_HOME.c_str())) != 0) { 
+        if(strncmp(canon_file, STORAGE_PATH.c_str(), strlen(STORAGE_PATH.c_str())) != 0) { 
             // Unauthorized path!
             free(canon_file); 
             // File do not exist
@@ -802,7 +824,7 @@ bool upload_command(int fd, unsigned char* key, uint32_t* seq_number){
     // Upload the file
     cout << "Uploading " << '"'<<filename<<'"' << " with " << fragments << " frags" << endl;
     unsigned char* data;
-    uint32_t data_len;
+    unsigned int data_len;
     msg_type = UPLOAD_FRGM; 
     int progress;
     for (int i = 0; i< fragments; i++){
@@ -858,12 +880,14 @@ bool download_command(int fd, unsigned char* key, uint32_t* seq_number){
         cout << "Filename not valid." << endl;
         return true;
     }
+    if(filename.size() > FILENAME_SIZE) filename.resize(FILENAME_SIZE);
+
     string filepath = STORAGE_PATH + filename;
 
     // canonicalizing path
     char* canon_file = realpath(filepath.c_str(), NULL);
     if(canon_file){
-        if(strncmp(canon_file, STORAGE_HOME.c_str(), strlen(STORAGE_HOME.c_str())) != 0) { 
+        if(strncmp(canon_file, STORAGE_PATH.c_str(), strlen(STORAGE_PATH.c_str())) != 0) { 
             // Unauthorized path!
             free(canon_file); 
             // File do not exist
@@ -903,7 +927,7 @@ bool download_command(int fd, unsigned char* key, uint32_t* seq_number){
         // get downalod fragments
         while(msg_type != DOWNLOAD_END){
             msg_type = read_data_message(fd, key, &plaintext, &pt_len, seq_number);
-            if(msg_type == OP_FAIL){// || msg_type != DOWNLOAD_FRGM){
+            if(msg_type == OP_FAIL){
                 fclose(file);
                 return false;
             }
@@ -914,7 +938,6 @@ bool download_command(int fd, unsigned char* key, uint32_t* seq_number){
                 cout << "\r Downloading" << std::string(dl_index,'.') << std::flush;
                 dl_index++;
             }
-            //cout << i << endl;
         }
         cout << "Download completed!" << endl;
         fclose(file);
@@ -933,6 +956,7 @@ bool rename_command(int fd, unsigned char* key, uint32_t* seq_number){
         cout << "Filename not valid." << endl;
         return true;
     }
+    if(old_file.size() > FILENAME_SIZE) old_file.resize(FILENAME_SIZE);
 
     // sending request to server
     int err = send_message(fd, key, RENAME_REQ, old_file, seq_number);
@@ -956,13 +980,14 @@ bool rename_command(int fd, unsigned char* key, uint32_t* seq_number){
         send_message(fd, key, OP_FAIL, old_file, seq_number);
         return false; 
     }
-    
+
     // checking filename
     if(!check_string(new_filename)){
         cout << "Filename not valid." << endl;
         send_message(fd, key, RENAME_FAIL, old_file, seq_number);
         return true;
     }
+    if(new_filename.size() > FILENAME_SIZE) new_filename.resize(FILENAME_SIZE);
 
     // New filename is ok, sending to server
     err = send_message(fd, key, RENAME_REQ, new_filename, seq_number);
@@ -980,81 +1005,6 @@ bool rename_command(int fd, unsigned char* key, uint32_t* seq_number){
     
     cout << "File renamed!" << endl;
     return true;
-}
-
-void canonicalize(string s1){
-    char* canon_str2 = realpath(s1.c_str(), NULL);
-    if(!canon_str2) return;
-    if(strncmp(canon_str2, "/home/", strlen("/home/")) != 0) { free(canon_str2); return; } // check that directory is "/home" (in some systems this should be: "/home/<username>")
-    ifstream f(canon_str2, ios::in); // only files in the home directory or its subdirs should be opened here!
-    free(canon_str2);
-    if(!f) { cerr << "Cannot open " << s1 << endl; return; }
-    string line;
-    do{
-        getline(f, line);
-        cout << line << endl;
-    }
-    // THERE IS A TOCTOU problem
-    while(!f.eof());
-    f.close();
-}
-
-bool unsigned_math(string op, unsigned int a, unsigned int b, unsigned int* result){
-    map<string,int> commands;
-    commands.insert(pair<string,int>("sum",1));
-    commands.insert(pair<string,int>("sub", 2));
-    commands.insert(pair<string,int>("div",3));
-    commands.insert(pair<string,int>("mul",4));
-    commands.insert(pair<string,int>("increment",5));
-    commands.insert(pair<string,int>("decrement",6));
-    commands.insert(pair<string,int>("module",7));
-    switch(commands[op]){
-        case 1:{
-            // sum
-            if(a > UINT_MAX - b) return false;
-            *result = a + b;
-            return true;
-        }
-        case 2:{
-            // subtraction
-            if (a < b) return false;
-            *result = a - b;
-            return true;
-        }
-        case 3:{
-            // division
-            if (b==0) return false;
-            *result = a/b;
-            return true;
-        }
-        case 4:{
-            // mul
-            if(b!= 0 && a > UINT_MAX/b) return false;
-            *result = a*b;
-            return true;
-        }
-        case 5:{
-            // increment
-            if(a == UINT_MAX) return false;
-            *result = a++;
-            return true;
-        }
-        case 6:{
-            // decrement
-            if(a == 0) return false;
-            *result = a--;
-            return true;
-        }
-        case 7:{
-            //module
-            if(b==0) return false;
-            *result = a%b;
-            return true;
-        }
-        default:{
-            break;
-        }
-    }
 }
 
 void show_welcome_msg(){
