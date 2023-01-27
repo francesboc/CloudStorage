@@ -1,0 +1,2 @@
+g++ ./Server/server.cpp ./Common/CryptoManager.cpp ./Common/ConnectionManager.cpp -lcrypto -lpthread -o ./Server/server
+g++ ./Client/client.cpp ./Common/CryptoManager.cpp ./Common/ConnectionManager.cpp -lcrypto -o ./Client/client

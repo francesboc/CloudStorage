@@ -50,11 +50,11 @@ int verify_certificate(X509* cacert, X509_CRL* crl, X509* srv_cert);
 
 EVP_PKEY* generate_pubkey();
 
-unsigned int sign(EVP_PKEY* priv_key, unsigned char* buf, unsigned int buf_len, unsigned char* signature);
-int verify_signature(EVP_PKEY* pubkey, unsigned char* buf, unsigned int buf_len, unsigned char* signature, unsigned int sig_len);
+uint32_t sign(EVP_PKEY* priv_key, unsigned char* buf, uint32_t buf_len, unsigned char* signature);
+int verify_signature(EVP_PKEY* pubkey, unsigned char* buf, uint32_t buf_len, unsigned char* signature, uint32_t sig_len);
 
-int derive_shared_secret(EVP_PKEY* dhkey1, EVP_PKEY* dhkey2, unsigned char** skey);
-unsigned int hash_secret(unsigned char* digest, unsigned char* skey, unsigned int skeylen);
+uint32_t derive_shared_secret(EVP_PKEY* dhkey1, EVP_PKEY* dhkey2, unsigned char** skey);
+uint32_t hash_secret(unsigned char* digest, unsigned char* skey, uint32_t skeylen);
 
 void free_crypto(unsigned char* buf, size_t size);
 

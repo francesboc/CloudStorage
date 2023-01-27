@@ -111,13 +111,13 @@ int readn(long fd, void *buf, size_t size);
 int writen(long fd, void *buf, size_t size);
 int send_data(int fd, unsigned char* message, int len);
 int read_data(int fd, unsigned char** message, int* len);
-int send_udata(int fd, unsigned char* message, unsigned int len);
-int read_udata(int fd, unsigned char** message, unsigned int* len);
+int send_udata(int fd, unsigned char* message, uint32_t len);
+int read_udata(int fd, unsigned char** message, uint32_t* len);
 
 command_t read_message(int fd, unsigned char* key, string &plaintext, uint32_t *seq_number);
 int send_message(int fd, unsigned char* key, command_t msg_type, string message, uint32_t* seq_number);
-int send_data_message(int fd, unsigned char* key, command_t msg_type, unsigned char* plaintext, unsigned int pt_len, uint32_t* seq_number);
-command_t read_data_message(int fd, unsigned char* key, unsigned char** plaintext, int* pt_len, uint32_t *seq_number);
+int send_data_message(int fd, unsigned char* key, command_t msg_type, unsigned char* plaintext, uint32_t pt_len, uint32_t* seq_number);
+command_t read_data_message(int fd, unsigned char* key, unsigned char** plaintext, uint32_t* pt_len, uint32_t *seq_number);
 int send_authenticated_msg(int fd, unsigned char* key, command_t msg_type, uint32_t* seq_number);
 command_t read_authenticated_msg(int fd, unsigned char* key, uint32_t* seq_number);
 
@@ -125,10 +125,10 @@ command_t read_authenticated_msg(int fd, unsigned char* key, uint32_t* seq_numbe
  * @brief Handshake management functions
  */
 
-unsigned int serialize_certificate(int fd, X509* srv_cert, unsigned char** cert_buf);
-unsigned int serialize_pubkey(int fd, EVP_PKEY* pubkey, unsigned char** pubkey_buf);
-X509* deserialize_certificate(unsigned char* srv_cert_buf, unsigned int srv_cert_len);
-EVP_PKEY* deserialize_pubkey(unsigned char* srv_pubkey_buf, unsigned int srv_pubkey_len);
+uint32_t serialize_certificate(int fd, X509* srv_cert, unsigned char** cert_buf);
+uint32_t serialize_pubkey(int fd, EVP_PKEY* pubkey, unsigned char** pubkey_buf);
+X509* deserialize_certificate(unsigned char* srv_cert_buf, uint32_t srv_cert_len);
+EVP_PKEY* deserialize_pubkey(unsigned char* srv_pubkey_buf, uint32_t srv_pubkey_len);
 
 /**
  * @brief Utility functions
@@ -138,7 +138,7 @@ void error_msg_type(string msg, command_t msg_type);
 bool check_string(string s1);
 bool strictly_check_string(string s1);
 bool canonicalize1(string file, string username);
-bool unsigned_math(string op, unsigned int a, unsigned int b, unsigned int* result);
+bool unsigned_math(string op, uint32_t a, uint32_t b, uint32_t* result);
 
 
 #endif /* _UTILS_H_ */

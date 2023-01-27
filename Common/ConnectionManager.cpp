@@ -1,6 +1,5 @@
 #include "utils.h"
 #include "crypto.h"
-#include "Packet.h"
 #include <string.h>
 
 int readn(long fd, void *buf, size_t size){
@@ -13,7 +12,7 @@ int readn(long fd, void *buf, size_t size){
             if (errno == ECONNRESET) return 0;
             return -1;
         }
-        if (r == 0) return 0;   // gestione chiusura socket
+        if (r == 0) return 0; 
         left    -= r;
         bufptr  += r;
     }
@@ -71,9 +70,9 @@ int read_data(int fd, unsigned char** message, int* len){
 }
 
 
-int send_udata(int fd, unsigned char* message, unsigned int len){
+int send_udata(int fd, unsigned char* message, uint32_t len){
     int err;
-    err = writen(fd, &len, sizeof(unsigned int));
+    err = writen(fd, &len, sizeof(uint32_t));
     if(err <= 0){
         cerr << "Fail to write message len" << endl;
         return 0;
@@ -87,9 +86,9 @@ int send_udata(int fd, unsigned char* message, unsigned int len){
     return 1;
 }
 
-int read_udata(int fd, unsigned char** message, unsigned int* len){
+int read_udata(int fd, unsigned char** message, uint32_t* len){
     int err;
-    err = readn(fd, len, sizeof(unsigned int));
+    err = readn(fd, len, sizeof(uint32_t));
     if(err <= 0){
         cerr << "Fail to read message len" << endl;
         return 0;
@@ -120,7 +119,7 @@ int send_authenticated_msg(int fd, unsigned char* key, command_t msg_type, uint3
     err = gcm_authenticate(aads, AAD_FRAGMNENT, key, iv, tag_buf);
     if (err == 0){
         // Error while encrypting
-        cout << "Authenticate message fail (occhio alla lunghezza 0)" << endl;
+        cout << "Authenticate message fail" << endl;
         delete [] tag_buf;
         delete [] aads;
         delete [] iv;
@@ -186,7 +185,7 @@ command_t read_authenticated_msg(int fd, unsigned char* key, uint32_t* seq_numbe
     delete [] aads;
     if (err == 0){
         // error in decrpytion
-        cout << "Verify message fail (occhio alla lunghezza 0)" << endl;
+        cout << "Verify message fail" << endl;
         return OP_FAIL;
     }
     *seq_number = *seq_number + 1;
@@ -199,6 +198,13 @@ int send_message(int fd, unsigned char* key, command_t msg_type, string message,
     generate_random(iv, IV_SIZE);
 
     int plain_len = message.size();
+
+    if(plain_len > INT_MAX - 16){
+        cout << "Encrypt send message fail: overflow" << endl;
+        delete [] iv;
+        return 0;
+    } 
+
     int cphr_len = plain_len + 16;
     int tag_len, err;
 
@@ -213,7 +219,17 @@ int send_message(int fd, unsigned char* key, command_t msg_type, string message,
     cphr_len = gcm_encrpyt((unsigned char*)message.c_str(), plain_len, aads, AAD_FRAGMNENT, key, iv, IV_SIZE, cphr_buf, tag_buf);
     if (cphr_len < 0){
         // Error while encrypting
-        cout << "Encrypt message fail (occhio alla lunghezza 0)" << endl;
+        cout << "Encrypt message fail" << endl;
+        delete [] cphr_buf;
+        delete [] tag_buf;
+        delete [] aads;
+        delete [] iv;
+        return 0;
+    }
+
+    if (cphr_len > INT_MAX - (sizeof(command_t) + sizeof(int) + sizeof(int) + IV_SIZE + TAG_SIZE)){
+        // Error while encrypting
+        cout << "Send encrypted send message failed: overflow" << endl;
         delete [] cphr_buf;
         delete [] tag_buf;
         delete [] aads;
@@ -292,7 +308,7 @@ command_t read_message(int fd, unsigned char* key, string &plaintext, uint32_t *
     delete [] aads;
     if (pt_len < 0){
         // error in decrpytion
-        cout << "Decrypt message fail (occhio alla lunghezza 0)" << endl;
+        cout << "Decrypt message fail" << endl;
         delete [] message;
         return OP_FAIL;
     }
@@ -307,12 +323,18 @@ command_t read_message(int fd, unsigned char* key, string &plaintext, uint32_t *
     return msg_type;
 }
 
-int send_data_message(int fd, unsigned char* key, command_t msg_type, unsigned char* plaintext, unsigned int pt_len, uint32_t* seq_number){
+int send_data_message(int fd, unsigned char* key, command_t msg_type, unsigned char* plaintext, uint32_t pt_len, uint32_t* seq_number){
     unsigned char* iv;  NEW(iv, new unsigned char[IV_SIZE], "new iv");
     generate_random(iv, IV_SIZE);
 
+    if(pt_len > INT_MAX - 16){
+        cout << "Encrypt message fail: overflow" << endl;
+        delete [] iv;
+        return 0;
+    } 
+
     int cphr_len = pt_len + 16;
-    int tag_len, err;
+    int err;
 
     unsigned char* cphr_buf; NEW(cphr_buf, new unsigned char[cphr_len], "new cphr buf");
     unsigned char* tag_buf; NEW(tag_buf, new unsigned char[TAG_SIZE], "new tag buf");
@@ -325,7 +347,17 @@ int send_data_message(int fd, unsigned char* key, command_t msg_type, unsigned c
     cphr_len = gcm_encrpyt(plaintext, pt_len, aads, AAD_FRAGMNENT, key, iv, IV_SIZE, cphr_buf, tag_buf);
     if (cphr_len < 0){
         // Error while encrypting
-        cout << "Encrypt message fail (occhio alla lunghezza 0)" << endl;
+        cout << "Encrypt message fail" << endl;
+        delete [] cphr_buf;
+        delete [] tag_buf;
+        delete [] aads;
+        delete [] iv;
+        return 0;
+    }
+
+    if (cphr_len > INT_MAX - (sizeof(command_t) + sizeof(int) + sizeof(int) + IV_SIZE + TAG_SIZE)){
+        // Error while encrypting
+        cout << "Send encrypted message failed: overflow" << endl;
         delete [] cphr_buf;
         delete [] tag_buf;
         delete [] aads;
@@ -355,14 +387,13 @@ int send_data_message(int fd, unsigned char* key, command_t msg_type, unsigned c
     return err;
 }
 
-command_t read_data_message(int fd, unsigned char* key, unsigned char** plaintext, int* pt_len, uint32_t *seq_number){
-    int err, request_len;
+command_t read_data_message(int fd, unsigned char* key, unsigned char** plaintext, uint32_t* pt_len, uint32_t *seq_number){
+    int err, request_len, decrypt_result;
     unsigned char* request;
 
     err = read_data(fd, &request, &request_len);
     if(err == 0){
         cout << "Fail to read request" << endl;
-        //delete [] request;
         return OP_FAIL;
     }
 
@@ -401,19 +432,19 @@ command_t read_data_message(int fd, unsigned char* key, unsigned char** plaintex
     delete [] request;
     
     NEW(*plaintext, new unsigned char[cphr_len], "new message");
-    *pt_len = gcm_decrypt(cphr_buf, cphr_len, aads, AAD_FRAGMNENT, tag_buf, key, iv, IV_SIZE, *plaintext);
-    
+    decrypt_result = gcm_decrypt(cphr_buf, cphr_len, aads, AAD_FRAGMNENT, tag_buf, key, iv, IV_SIZE, *plaintext);
+
     delete [] cphr_buf;
     delete [] tag_buf;
     delete [] iv;
     delete [] aads;
-    if (*pt_len < 0){
+    if (decrypt_result < 0){
         // error in decrpytion
-        cout << "Decrypt message fail (occhio alla lunghezza 0)" << endl;
+        cout << "Decrypt message fail" << endl;
         delete [] *plaintext;
         return OP_FAIL;
     }
-    
+    *pt_len = decrypt_result;
     *seq_number = *seq_number + 1;
     return msg_type;
 }
@@ -421,7 +452,7 @@ command_t read_data_message(int fd, unsigned char* key, unsigned char** plaintex
 /**
 * @brief Serialize a X509 into an unsigned char
 */
-unsigned int serialize_certificate(int fd, X509* srv_cert, unsigned char** cert_buf){
+uint32_t serialize_certificate(int fd, X509* srv_cert, unsigned char** cert_buf){
     BIO* bio = BIO_new(BIO_s_mem());
     if(!bio){ cerr << "ERROR: Allocating bio" << endl; return 0; }
     if (1 != PEM_write_bio_X509(bio, srv_cert)) { 
@@ -429,7 +460,7 @@ unsigned int serialize_certificate(int fd, X509* srv_cert, unsigned char** cert_
         BIO_free(bio);
         return 0;
     }
-    unsigned int cert_buf_len = BIO_ctrl_pending(bio);
+    uint32_t cert_buf_len = BIO_ctrl_pending(bio);
     NEW(*cert_buf, new unsigned char[cert_buf_len], "pubkey serialization");
     if(BIO_read(bio, *cert_buf, cert_buf_len)<=0) { 
         cerr << "ERROR: BIO_read" << endl;
@@ -442,9 +473,9 @@ unsigned int serialize_certificate(int fd, X509* srv_cert, unsigned char** cert_
 }
 
 /**
-* @brief Serializa a EVP_PKEY into an unsigned char
+* @brief Serialize a EVP_PKEY into an unsigned char
 */
-unsigned int serialize_pubkey(int fd, EVP_PKEY* pubkey, unsigned char** pubkey_buf){
+uint32_t serialize_pubkey(int fd, EVP_PKEY* pubkey, unsigned char** pubkey_buf){
     BIO* bio = BIO_new(BIO_s_mem());
     if(!bio){ cerr << "ERROR: Allocating bio" << endl; return 0; }
     if (1 != PEM_write_bio_PUBKEY(bio, pubkey)) { 
@@ -452,7 +483,7 @@ unsigned int serialize_pubkey(int fd, EVP_PKEY* pubkey, unsigned char** pubkey_b
         BIO_free(bio);
         return 0;
     }
-    unsigned int pubkey_len = BIO_ctrl_pending(bio);
+    uint32_t pubkey_len = BIO_ctrl_pending(bio);
     NEW(*pubkey_buf, new unsigned char[pubkey_len], "pubkey serialization");
     if(BIO_read(bio, *pubkey_buf, pubkey_len)<=0) { 
         cerr << "ERROR: BIO_read" << endl;
@@ -463,7 +494,7 @@ unsigned int serialize_pubkey(int fd, EVP_PKEY* pubkey, unsigned char** pubkey_b
     return pubkey_len;
 }
 
-X509* deserialize_certificate(unsigned char* srv_cert_buf, unsigned int srv_cert_len){
+X509* deserialize_certificate(unsigned char* srv_cert_buf, uint32_t srv_cert_len){
     BIO* bio = BIO_new(BIO_s_mem());
     if(!bio) { cerr << "ERROR: Allocating bio" << endl; return NULL; }
 
@@ -479,7 +510,7 @@ X509* deserialize_certificate(unsigned char* srv_cert_buf, unsigned int srv_cert
     return cert;
 }
 
-EVP_PKEY* deserialize_pubkey(unsigned char* srv_pubkey_buf, unsigned int srv_pubkey_len){
+EVP_PKEY* deserialize_pubkey(unsigned char* srv_pubkey_buf, uint32_t srv_pubkey_len){
     BIO* bio = BIO_new(BIO_s_mem());
     if(!bio) { cerr << "ERROR: Allocating bio" << endl; return NULL; }
 
@@ -503,7 +534,7 @@ bool check_string(string s1){
                              "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
                              "1234567890_.";
     if( s1.find_first_not_of(ok_chars) != string::npos) return false;
-    if( (s1.length()==1 && s1[0] == '.') || (s1.length()==2 && s1[0] == '.' && s1[1]=='.') || (s1.length()==1 && s1[0]=='_')) return false;
+    if( (s1.length()>=1 && s1[0] == '.') || (s1.length()==2 && s1[0] == '.' && s1[1]=='.') || (s1.length()==1 && s1[0]=='_')) return false;
     return true;
 }
 
@@ -538,7 +569,7 @@ void error_msg_type(string msg, command_t msg_type){
     }
 }
 
-bool unsigned_math(string op, unsigned int a, unsigned int b, unsigned int* result){
+bool unsigned_math(string op, uint32_t a, uint32_t b, uint32_t* result){
     map<string,int> commands;
     commands.insert(pair<string,int>("sum",1));
     commands.insert(pair<string,int>("sub", 2));
@@ -550,7 +581,7 @@ bool unsigned_math(string op, unsigned int a, unsigned int b, unsigned int* resu
     switch(commands[op]){
         case 1:{
             // sum
-            if(a > UINT_MAX - b) return false;
+            if(a > UINT32_MAX - b) return false;
             *result = a + b;
             return true;
         }
@@ -568,13 +599,13 @@ bool unsigned_math(string op, unsigned int a, unsigned int b, unsigned int* resu
         }
         case 4:{
             // mul
-            if(b!= 0 && a > UINT_MAX/b) return false;
+            if(b!= 0 && a > UINT32_MAX/b) return false;
             *result = a*b;
             return true;
         }
         case 5:{
             // increment
-            if(a == UINT_MAX) return false;
+            if(a == UINT32_MAX) return false;
             *result = a++;
             return true;
         }

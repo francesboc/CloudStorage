@@ -206,8 +206,8 @@ int gcm_verify(unsigned char *aad, int aad_len,
     }
 
 }
-unsigned int sign(EVP_PKEY* priv_key, unsigned char* buf, unsigned int buf_len, unsigned char* signature){
-    unsigned int signature_len = 0;
+uint32_t sign(EVP_PKEY* priv_key, unsigned char* buf, uint32_t buf_len, unsigned char* signature){
+    uint32_t signature_len = 0;
     EVP_MD_CTX* md_ctx = EVP_MD_CTX_new();
     if(!md_ctx){
         FAIL("New sign ctx");
@@ -233,7 +233,7 @@ unsigned int sign(EVP_PKEY* priv_key, unsigned char* buf, unsigned int buf_len, 
     return signature_len;
 }
 
-int verify_signature(EVP_PKEY* pubkey, unsigned char* buf, unsigned int buf_len, unsigned char* signature, unsigned int sig_len){
+int verify_signature(EVP_PKEY* pubkey, unsigned char* buf, uint32_t buf_len, unsigned char* signature, uint32_t sig_len){
     int err;
     EVP_MD_CTX* md_ctx = EVP_MD_CTX_new();
     // AD ogni return libera il context
@@ -346,7 +346,7 @@ EVP_PKEY* generate_pubkey(){
     return my_dhkey;
 }
 
-int derive_shared_secret(EVP_PKEY* dhkey1, EVP_PKEY* dhkey2, unsigned char** skey){
+uint32_t derive_shared_secret(EVP_PKEY* dhkey1, EVP_PKEY* dhkey2, unsigned char** skey){
     EVP_PKEY_CTX *derive_ctx;
     size_t skeylen;
     derive_ctx = EVP_PKEY_CTX_new(dhkey1,NULL);
@@ -374,8 +374,8 @@ int derive_shared_secret(EVP_PKEY* dhkey1, EVP_PKEY* dhkey2, unsigned char** ske
     return skeylen;
 }
 
-unsigned int hash_secret(unsigned char* digest, unsigned char* skey, unsigned int skeylen){
-    unsigned int digestlen;	
+uint32_t hash_secret(unsigned char* digest, unsigned char* skey, uint32_t skeylen){
+    uint32_t digestlen;	
     // Create and init context
     EVP_MD_CTX *Hctx;
     Hctx = EVP_MD_CTX_new();
